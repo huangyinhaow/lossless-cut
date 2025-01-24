@@ -4,19 +4,16 @@ import { WarningSignIcon, CrossIcon } from 'evergreen-ui';
 import { FaRegCheckCircle } from 'react-icons/fa';
 import i18n from 'i18next';
 import { useTranslation, Trans } from 'react-i18next';
-import { IoIosHelpCircle } from 'react-icons/io';
+import { IoIosHelpCircle, IoIosSettings } from 'react-icons/io';
 import type { SweetAlertIcon } from 'sweetalert2';
 
 import ExportButton from './ExportButton';
 import ExportModeButton from './ExportModeButton';
-import PreserveMovDataButton from './PreserveMovDataButton';
-import MovFastStartButton from './MovFastStartButton';
 import ToggleExportConfirm from './ToggleExportConfirm';
-import OutSegTemplateEditor from './OutSegTemplateEditor';
+import FileNameTemplateEditor from './FileNameTemplateEditor';
 import HighlightedText, { highlightedTextStyle } from './HighlightedText';
 import Select from './Select';
 import Switch from './Switch';
-import MergedOutFileName from './MergedOutFileName';
 
 import { primaryTextColor } from '../colors';
 import { withBlur } from '../util';
@@ -25,9 +22,9 @@ import { isMov as ffmpegIsMov } from '../util/streams';
 import useUserSettings from '../hooks/useUserSettings';
 import styles from './ExportConfirm.module.css';
 import { InverseCutSegment, SegmentToExport } from '../types';
-import { GenerateOutSegFileNames } from '../util/outputNameTemplate';
+import { defaultMergedFileTemplate, defaultOutSegTemplate, GenerateOutFileNames } from '../util/outputNameTemplate';
 import { FFprobeStream } from '../../../../ffprobe';
-import { AvoidNegativeTs } from '../../../../types';
+import { AvoidNegativeTs, PreserveMetadata } from '../../../../types';
 import TextInput from './TextInput';
 
 
@@ -37,7 +34,19 @@ const outDirStyle: CSSProperties = { ...highlightedTextStyle, wordBreak: 'break-
 
 const warningStyle: CSSProperties = { color: 'var(--orange8)', fontSize: '80%', marginBottom: '.5em' };
 
+const adjustCutFromValues = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const adjustCutToValues = [-10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
 const HelpIcon = ({ onClick, style }: { onClick: () => void, style?: CSSProperties }) => <IoIosHelpCircle size={20} role="button" onClick={withBlur(onClick)} style={{ cursor: 'pointer', color: primaryTextColor, verticalAlign: 'middle', ...style }} />;
+
+function ShiftTimes({ values, num, setNum }: { values: number[], num: number, setNum: (n: number) => void }) {
+  const { t } = useTranslation();
+  return (
+    <Select value={num} onChange={(e) => setNum(Number(e.target.value))} style={{ height: 20, marginLeft: 5 }}>
+      {values.map((v) => <option key={v} value={v}>{t('{{numFrames}} frames', { numFrames: v >= 0 ? `+${v}` : v, count: v })}</option>)}
+    </Select>
+  );
+}
 
 function ExportConfirm({
   areWeCutting,
@@ -55,15 +64,18 @@ function ExportConfirm({
   onShowStreamsSelectorClick,
   outSegTemplate,
   setOutSegTemplate,
+  mergedFileTemplate,
+  setMergedFileTemplate,
   generateOutSegFileNames,
+  generateMergedFileNames,
   currentSegIndexSafe,
   nonFilteredSegmentsOrInverse,
   mainCopiedThumbnailStreams,
   needSmartCut,
-  mergedOutFileName,
-  setMergedOutFileName,
   smartCutBitrate,
   setSmartCutBitrate,
+  toggleSettings,
+  outputPlaybackRate,
 } : {
   areWeCutting: boolean,
   selectedSegments: InverseCutSegment[],
@@ -80,25 +92,46 @@ function ExportConfirm({
   onShowStreamsSelectorClick: () => void,
   outSegTemplate: string,
   setOutSegTemplate: (a: string) => void,
-  generateOutSegFileNames: GenerateOutSegFileNames,
+  mergedFileTemplate: string,
+  setMergedFileTemplate: (a: string) => void,
+  generateOutSegFileNames: GenerateOutFileNames,
+  generateMergedFileNames: GenerateOutFileNames,
   currentSegIndexSafe: number,
   nonFilteredSegmentsOrInverse: InverseCutSegment[],
   mainCopiedThumbnailStreams: FFprobeStream[],
   needSmartCut: boolean,
-  mergedOutFileName: string | undefined,
-  setMergedOutFileName: (a: string) => void,
   smartCutBitrate: number | undefined,
   setSmartCutBitrate: Dispatch<SetStateAction<number | undefined>>,
+  toggleSettings: () => void,
+  outputPlaybackRate: number,
 }) {
   const { t } = useTranslation();
 
-  const { changeOutDir, keyframeCut, toggleKeyframeCut, preserveMovData, movFastStart, avoidNegativeTs, setAvoidNegativeTs, autoDeleteMergedSegments, exportConfirmEnabled, toggleExportConfirmEnabled, segmentsToChapters, toggleSegmentsToChapters, preserveMetadataOnMerge, togglePreserveMetadataOnMerge, enableSmartCut, setEnableSmartCut, effectiveExportMode, enableOverwriteOutput, setEnableOverwriteOutput, ffmpegExperimental, setFfmpegExperimental, cutFromAdjustmentFrames, setCutFromAdjustmentFrames } = useUserSettings();
+  const { changeOutDir, keyframeCut, toggleKeyframeCut, preserveMovData, setPreserveMovData, preserveMetadata, setPreserveMetadata, preserveChapters, setPreserveChapters, movFastStart, setMovFastStart, avoidNegativeTs, setAvoidNegativeTs, autoDeleteMergedSegments, exportConfirmEnabled, toggleExportConfirmEnabled, segmentsToChapters, setSegmentsToChapters, preserveMetadataOnMerge, setPreserveMetadataOnMerge, enableSmartCut, setEnableSmartCut, effectiveExportMode, enableOverwriteOutput, setEnableOverwriteOutput, ffmpegExperimental, setFfmpegExperimental, cutFromAdjustmentFrames, setCutFromAdjustmentFrames, cutToAdjustmentFrames, setCutToAdjustmentFrames } = useUserSettings();
+
+  const togglePreserveChapters = useCallback(() => setPreserveChapters((val) => !val), [setPreserveChapters]);
+  const togglePreserveMovData = useCallback(() => setPreserveMovData((val) => !val), [setPreserveMovData]);
+  const toggleMovFastStart = useCallback(() => setMovFastStart((val) => !val), [setMovFastStart]);
+  const toggleSegmentsToChapters = useCallback(() => setSegmentsToChapters((v) => !v), [setSegmentsToChapters]);
+  const togglePreserveMetadataOnMerge = useCallback(() => setPreserveMetadataOnMerge((v) => !v), [setPreserveMetadataOnMerge]);
 
   const isMov = ffmpegIsMov(outFormat);
   const isIpod = outFormat === 'ipod';
 
   // some thumbnail streams (png,jpg etc) cannot always be cut correctly, so we warn if they try to.
   const areWeCuttingProblematicStreams = areWeCutting && mainCopiedThumbnailStreams.length > 0;
+
+  const warnings = useMemo(() => {
+    const ret: string[] = [];
+    // https://github.com/mifi/lossless-cut/issues/1809
+    if (areWeCutting && outFormat === 'flac') {
+      ret.push(t('There is a known issue in FFmpeg with cutting FLAC files. The file will be re-encoded, which is still lossless, but the export may be slower.'));
+    }
+    if (areWeCutting && outputPlaybackRate !== 1) {
+      ret.push(t('Adjusting the output FPS and cutting at the same time will cause incorrect cuts. Consider instead doing it in two separate steps.'));
+    }
+    return ret;
+  }, [areWeCutting, outFormat, outputPlaybackRate, t]);
 
   const exportModeDescription = useMemo(() => ({
     segments_to_chapters: t('Don\'t cut the file, but instead export an unmodified original which has chapters generated from segments'),
@@ -109,8 +142,16 @@ function ExportConfirm({
 
   const showHelpText = useCallback(({ icon = 'info', timer = 10000, text }: { icon?: SweetAlertIcon, timer?: number, text: string }) => toast.fire({ icon, timer, text }), []);
 
+  const onPreserveChaptersPress = useCallback(() => {
+    toast.fire({ icon: 'info', timer: 10000, text: i18n.t('Whether to preserve chapters from source file.') });
+  }, []);
+
   const onPreserveMovDataHelpPress = useCallback(() => {
     toast.fire({ icon: 'info', timer: 10000, text: i18n.t('Preserve all MOV/MP4 metadata tags (e.g. EXIF, GPS position etc.) from source file? Note that some players have trouble playing back files where all metadata is preserved, like iTunes and other Apple software') });
+  }, []);
+
+  const onPreserveMetadataHelpPress = useCallback(() => {
+    toast.fire({ icon: 'info', timer: 10000, text: i18n.t('Whether to preserve metadata from source file. Default: Global (file metadata), per-track and per-chapter metadata will be copied. Non-global: Only per-track and per-chapter metadata will be copied. None: No metadata will be copied') });
   }, []);
 
   const onMovFastStartHelpPress = useCallback(() => {
@@ -145,12 +186,17 @@ function ExportConfirm({
     toast.fire({ icon: 'info', timer: 10000, text: i18n.t('You can customize the file name of the output segment(s) using special variables.', { count: segmentsToExport.length }) });
   }, [segmentsToExport.length]);
 
+  const onMergedFileTemplateHelpPress = useCallback(() => {
+    toast.fire({ icon: 'info', timer: 10000, text: i18n.t('You can customize the file name of the merged file using special variables.') });
+  }, []);
+
   const onExportModeHelpPress = useCallback(() => {
     toast.fire({ icon: 'info', timer: 10000, text: exportModeDescription });
   }, [exportModeDescription]);
 
   const onAvoidNegativeTsHelpPress = useCallback(() => {
     // https://ffmpeg.org/ffmpeg-all.html#Format-Options
+    // https://github.com/mifi/lossless-cut/issues/1206
     const texts = {
       make_non_negative: i18n.t('Shift timestamps to make them non-negative. Also note that this affects only leading negative timestamps, and not non-monotonic negative timestamps.'),
       make_zero: i18n.t('Shift timestamps so that the first timestamp is 0. (LosslessCut default)'),
@@ -168,7 +214,7 @@ function ExportConfirm({
     toast.fire({ icon: 'info', timer: 10000, text: t('Enable experimental ffmpeg features flag?') });
   }, [t]);
 
-  const canEditTemplate = !willMerge || !autoDeleteMergedSegments;
+  const canEditSegTemplate = !willMerge || !autoDeleteMergedSegments;
 
   const handleSmartCutBitrateToggle = useCallback((checked: boolean) => {
     setSmartCutBitrate(() => (checked ? undefined : 10000));
@@ -200,6 +246,14 @@ function ExportConfirm({
 
                 <table className={styles['options']}>
                   <tbody>
+                    {warnings.map((warning) => (
+                      <tr key={warning}>
+                        <td colSpan={2}>
+                          <div style={{ ...warningStyle, display: 'flex', alignItems: 'center', gap: '0 .5em' }}><WarningSignIcon verticalAlign="middle" color="warning" flexShrink="0" /> {warning}</div>
+                        </td>
+                        <td />
+                      </tr>
+                    ))}
                     {selectedSegments.length !== nonFilteredSegmentsOrInverse.length && (
                       <tr>
                         <td colSpan={2}>
@@ -266,10 +320,10 @@ function ExportConfirm({
                       <td />
                     </tr>
 
-                    {canEditTemplate && (
+                    {canEditSegTemplate && (
                       <tr>
                         <td colSpan={2}>
-                          <OutSegTemplateEditor outSegTemplate={outSegTemplate} setOutSegTemplate={setOutSegTemplate} generateOutSegFileNames={generateOutSegFileNames} currentSegIndexSafe={currentSegIndexSafe} />
+                          <FileNameTemplateEditor template={outSegTemplate} setTemplate={setOutSegTemplate} defaultTemplate={defaultOutSegTemplate} generateFileNames={generateOutSegFileNames} currentSegIndexSafe={currentSegIndexSafe} />
                         </td>
                         <td>
                           <HelpIcon onClick={onOutSegTemplateHelpPress} />
@@ -279,14 +333,11 @@ function ExportConfirm({
 
                     {willMerge && (
                       <tr>
-                        <td>
-                          {t('Merged output file name:')}
+                        <td colSpan={2}>
+                          <FileNameTemplateEditor template={mergedFileTemplate} setTemplate={setMergedFileTemplate} defaultTemplate={defaultMergedFileTemplate} generateFileNames={generateMergedFileNames} mergeMode />
                         </td>
                         <td>
-                          <MergedOutFileName mergedOutFileName={mergedOutFileName} setMergedOutFileName={setMergedOutFileName} />
-                        </td>
-                        <td>
-                          <HelpIcon onClick={() => showHelpText({ text: t('Name of the merged/concatenated output file when concatenating multiple segments.') })} />
+                          <HelpIcon onClick={onMergedFileTemplateHelpPress} />
                         </td>
                       </tr>
                     )}
@@ -309,6 +360,98 @@ function ExportConfirm({
 
                 <table className={styles['options']}>
                   <tbody>
+
+                    {areWeCutting && (
+                      <>
+                        <tr>
+                          <td>
+                            {t('Shift all start times')}
+                          </td>
+                          <td>
+                            <ShiftTimes values={adjustCutFromValues} num={cutFromAdjustmentFrames} setNum={setCutFromAdjustmentFrames} />
+                          </td>
+                          <td>
+                            <HelpIcon onClick={onCutFromAdjustmentFramesHelpPress} />
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>
+                            {t('Shift all end times')}
+                          </td>
+                          <td>
+                            <ShiftTimes values={adjustCutToValues} num={cutToAdjustmentFrames} setNum={setCutToAdjustmentFrames} />
+                          </td>
+                          <td />
+                        </tr>
+                      </>
+                    )}
+
+                    {isMov && (
+                      <>
+                        <tr>
+                          <td>
+                            {t('Enable MOV Faststart?')}
+                          </td>
+                          <td>
+                            <Switch checked={movFastStart} onCheckedChange={toggleMovFastStart} />
+                            {isIpod && !movFastStart && <div style={warningStyle}>{t('For the ipod format, it is recommended to activate this option')}</div>}
+                          </td>
+                          <td>
+                            {isIpod && !movFastStart ? (
+                              <WarningSignIcon verticalAlign="middle" color="warning" />
+                            ) : (
+                              <HelpIcon onClick={onMovFastStartHelpPress} />
+                            )}
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td>
+                            {t('Preserve all MP4/MOV metadata?')}
+                            {isIpod && preserveMovData && <div style={warningStyle}>{t('For the ipod format, it is recommended to deactivate this option')}</div>}
+                          </td>
+                          <td>
+                            <Switch checked={preserveMovData} onCheckedChange={togglePreserveMovData} />
+                          </td>
+                          <td>
+                            {isIpod && preserveMovData ? (
+                              <WarningSignIcon verticalAlign="middle" color="warning" />
+                            ) : (
+                              <HelpIcon onClick={onPreserveMovDataHelpPress} />
+                            )}
+                          </td>
+                        </tr>
+                      </>
+                    )}
+
+                    <tr>
+                      <td>
+                        {t('Preserve chapters')}
+                      </td>
+                      <td>
+                        <Switch checked={preserveChapters} onCheckedChange={togglePreserveChapters} />
+                      </td>
+                      <td>
+                        <HelpIcon onClick={onPreserveChaptersPress} />
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td>
+                        {t('Preserve metadata')}
+                      </td>
+                      <td>
+                        <Select value={preserveMetadata} onChange={(e) => setPreserveMetadata(e.target.value as PreserveMetadata)} style={{ height: 20, marginLeft: 5 }}>
+                          <option value={'default' as PreserveMetadata}>{t('Default')}</option>
+                          <option value={'none' satisfies PreserveMetadata}>{t('None')}</option>
+                          <option value={'nonglobal' satisfies PreserveMetadata}>{t('Non-global')}</option>
+                        </Select>
+                      </td>
+                      <td>
+                        <HelpIcon onClick={onPreserveMetadataHelpPress} />
+                      </td>
+                    </tr>
+
                     {willMerge && (
                       <>
                         <tr>
@@ -349,8 +492,10 @@ function ExportConfirm({
                         <tr>
                           <td>
                             {t('Smart cut (experimental):')}
+                            {needSmartCut && <div style={warningStyle}>{t('Smart cut is experimental and will not work on all files.')}</div>}
                           </td>
                           <td>
+
                             <Switch checked={enableSmartCut} onCheckedChange={() => setEnableSmartCut((v) => !v)} />
                           </td>
                           <td>
@@ -403,60 +548,6 @@ function ExportConfirm({
                       </>
                     )}
 
-                    {areWeCutting && (
-                      <tr>
-                        <td>
-                          {t('Shift all start times')}
-                        </td>
-                        <td>
-                          <Select value={cutFromAdjustmentFrames} onChange={(e) => setCutFromAdjustmentFrames(Number(e.target.value))} style={{ height: 20, marginLeft: 5 }}>
-                            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((v) => <option key={v} value={v}>{t('+{{numFrames}} frames', { numFrames: v, count: v })}</option>)}
-                          </Select>
-                        </td>
-                        <td>
-                          <HelpIcon onClick={onCutFromAdjustmentFramesHelpPress} />
-                        </td>
-                      </tr>
-                    )}
-
-                    {isMov && (
-                      <>
-                        <tr>
-                          <td>
-                            {t('Enable MOV Faststart?')}
-                          </td>
-                          <td>
-                            <MovFastStartButton />
-                            {isIpod && !movFastStart && <div style={warningStyle}>{t('For the ipod format, it is recommended to activate this option')}</div>}
-                          </td>
-                          <td>
-                            {isIpod && !movFastStart ? (
-                              <WarningSignIcon verticalAlign="middle" color="warning" />
-                            ) : (
-                              <HelpIcon onClick={onMovFastStartHelpPress} />
-                            )}
-                          </td>
-                        </tr>
-
-                        <tr>
-                          <td>
-                            {t('Preserve all MP4/MOV metadata?')}
-                            {isIpod && preserveMovData && <div style={warningStyle}>{t('For the ipod format, it is recommended to deactivate this option')}</div>}
-                          </td>
-                          <td>
-                            <PreserveMovDataButton />
-                          </td>
-                          <td>
-                            {isIpod && preserveMovData ? (
-                              <WarningSignIcon verticalAlign="middle" color="warning" />
-                            ) : (
-                              <HelpIcon onClick={onPreserveMovDataHelpPress} />
-                            )}
-                          </td>
-                        </tr>
-                      </>
-                    )}
-
                     {!needSmartCut && (() => {
                       const avoidNegativeTsWarn = (() => {
                         if (willMerge) {
@@ -474,7 +565,7 @@ function ExportConfirm({
                       return (
                         <tr>
                           <td>
-                            {`"${'avoid_negative_ts'}"`}
+                            &quot;ffmpeg&quot; <code className="highlighted">avoid_negative_ts</code>
                             {avoidNegativeTsWarn != null && <div style={warningStyle}>{avoidNegativeTsWarn}</div>}
                           </td>
                           <td>
@@ -506,6 +597,16 @@ function ExportConfirm({
                       <td>
                         <HelpIcon onClick={onFfmpegExperimentalHelpPress} />
                       </td>
+                    </tr>
+
+                    <tr>
+                      <td>
+                        {t('More settings')}
+                      </td>
+                      <td>
+                        <IoIosSettings size={24} role="button" onClick={toggleSettings} style={{ marginLeft: 5 }} />
+                      </td>
+                      <td />
                     </tr>
                   </tbody>
                 </table>

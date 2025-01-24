@@ -27,6 +27,12 @@ export interface ApparentSegmentBase {
 
 export interface ApparentSegmentWithColorIndex extends ApparentSegmentBase, SegmentColorIndex {}
 
+export const openFilesActionArgsSchema = z.tuple([z.string().array()]);
+export type OpenFilesActionArgs = z.infer<typeof openFilesActionArgsSchema>
+
+export const goToTimecodeDirectArgsSchema = z.tuple([z.object({ time: z.string() })]);
+export type GoToTimecodeDirectArgs = z.infer<typeof goToTimecodeDirectArgsSchema>
+
 export const segmentTagsSchema = z.record(z.string(), z.string());
 
 export type SegmentTags = z.infer<typeof segmentTagsSchema>
@@ -66,7 +72,7 @@ export interface InverseCutSegment {
 
 export type PlaybackMode = 'loop-segment-start-end' | 'loop-segment' | 'play-segment-once' | 'loop-selected-segments';
 
-export type EdlFileType = 'csv' | 'csv-frames' | 'cutlist' | 'xmeml' | 'fcpxml' | 'dv-analyzer-summary-txt' | 'cue' | 'pbf' | 'mplayer' | 'srt' | 'llc';
+export type EdlFileType = 'csv' | 'csv-frames' | 'cutlist' | 'xmeml' | 'fcpxml' | 'dv-analyzer-summary-txt' | 'cue' | 'pbf' | 'edl' | 'srt' | 'llc';
 
 export type EdlImportType = 'youtube' | EdlFileType;
 
@@ -113,8 +119,10 @@ export type CopyfileStreams = {
 
 export interface Chapter { start: number, end: number, name?: string | undefined }
 
+export type LiteFFprobeStream = Pick<FFprobeStream, 'index' | 'codec_type' | 'codec_tag' | 'codec_name' | 'disposition' | 'tags' | 'sample_rate' | 'time_base'>;
+
 export type AllFilesMeta = Record<string, {
-  streams: FFprobeStream[];
+  streams: LiteFFprobeStream[];
   formatData: FFprobeFormat;
   chapters: FFprobeChapter[];
 }>

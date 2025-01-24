@@ -5,21 +5,16 @@ import invariant from 'tiny-invariant';
 import { getOutDir, getFileDir, checkDirWriteAccess, dirExists, isMasBuild } from '../util';
 import { askForOutDir, askForInputDir } from '../dialogs';
 import { errorToast } from '../swal';
+import { DirectoryAccessDeclinedError } from '../../errors';
 // import isDev from '../isDev';
 
-export class DirectoryAccessDeclinedError extends Error {
-  constructor() {
-    super();
-    this.name = 'DirectoryAccessDeclinedError';
-  }
-}
 
 // MacOS App Store sandbox doesn't allow reading/writing anywhere,
 // except those exact file paths that have been explicitly drag-dropped into LosslessCut or opened using the opener dialog
 // Therefore we set the flag com.apple.security.files.user-selected.read-write
 // With this flag, we can show the user an open-dialog for a **directory**, and once the user has opened that directory, we can read/write files in this directory until the app is restarted.
 // NOTE! fs.stat is still allowed everywhere, even though read/write is not
-// see also developer-notes.md
+// see also CONTRIBUTING.md
 
 // const simulateMasBuild = isDev; // can be used for testing this logic without having to build mas-dev
 const simulateMasBuild = false;
@@ -56,7 +51,7 @@ export default ({ setCustomOutDir }: { setCustomOutDir: (a: string | undefined) 
     }
   }, []);
 
-  const ensureWritableOutDir = useCallback(async ({ inputPath, outDir }: { inputPath: string | undefined, outDir: string | undefined }) => {
+  const ensureWritableOutDir = useCallback(async ({ inputPath, outDir }: { inputPath?: string | undefined, outDir: string | undefined }) => {
     // we might need to change the output directory if the user chooses to give us a different one.
     let newCustomOutDir = outDir;
 
@@ -69,6 +64,7 @@ export default ({ setCustomOutDir }: { setCustomOutDir: (a: string | undefined) 
       }
     }
 
+    // if we don't (no longer) have a working dir, and not an main file path, then there's nothing we can do, just return the dir
     if (!newCustomOutDir && !inputPath) return newCustomOutDir;
 
     const effectiveOutDirPath = getOutDir(newCustomOutDir, inputPath);

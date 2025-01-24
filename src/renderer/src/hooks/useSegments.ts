@@ -9,19 +9,33 @@ import { detectSceneChanges as ffmpegDetectSceneChanges, readFrames, mapTimesToS
 import { handleError, shuffleArray } from '../util';
 import { errorToast } from '../swal';
 import { showParametersDialog } from '../dialogs/parameters';
-import { createNumSegments as createNumSegmentsDialog, createFixedDurationSegments as createFixedDurationSegmentsDialog, createRandomSegments as createRandomSegmentsDialog, labelSegmentDialog, askForShiftSegments, askForAlignSegments, selectSegmentsByLabelDialog, selectSegmentsByExprDialog } from '../dialogs';
+import { createNumSegments as createNumSegmentsDialog, createFixedDurationSegments as createFixedDurationSegmentsDialog, createRandomSegments as createRandomSegmentsDialog, labelSegmentDialog, askForShiftSegments, askForAlignSegments, selectSegmentsByLabelDialog, selectSegmentsByExprDialog, mutateSegmentsByExprDialog } from '../dialogs';
 import { createSegment, findSegmentsAtCursor, sortSegments, invertSegments, combineOverlappingSegments as combineOverlappingSegments2, combineSelectedSegments as combineSelectedSegments2, isDurationValid, getSegApparentStart, getSegApparentEnd as getSegApparentEnd2, addSegmentColorIndex } from '../segments';
-import * as ffmpegParameters from '../ffmpeg-parameters';
+import { parameters as allFfmpegParameters, FfmpegDialog } from '../ffmpegParameters';
 import { maxSegmentsAllowed } from '../util/constants';
-import { ParseTimecode, SegmentBase, SegmentToExport, StateSegment, UpdateSegAtIndex } from '../types';
+import { ApparentCutSegment, ParseTimecode, SegmentBase, segmentTagsSchema, SegmentToExport, StateSegment, UpdateSegAtIndex } from '../types';
 import safeishEval from '../worker/eval';
 import { ScopeSegment } from '../../../../types';
+import { FFprobeStream } from '../../../../ffprobe';
 
 const { ffmpeg: { blackDetect, silenceDetect } } = window.require('@electron/remote').require('./index.js');
 
 
-function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoStream, duration, getRelevantTime, maxLabelLength, checkFileOpened, invertCutSegments, segmentsToChaptersOnly, timecodePlaceholder, parseTimecode }: {
-  filePath?: string | undefined, workingRef: MutableRefObject<boolean>, setWorking: (w: { text: string, abortController?: AbortController } | undefined) => void, setCutProgress: (a: number | undefined) => void, videoStream, duration?: number | undefined, getRelevantTime: () => number, maxLabelLength: number, checkFileOpened: () => boolean, invertCutSegments: boolean, segmentsToChaptersOnly: boolean, timecodePlaceholder: string, parseTimecode: ParseTimecode,
+function useSegments({ filePath, workingRef, setWorking, setProgress, videoStream, duration, getRelevantTime, maxLabelLength, checkFileOpened, invertCutSegments, segmentsToChaptersOnly, timecodePlaceholder, parseTimecode, appendFfmpegCommandLog }: {
+  filePath?: string | undefined,
+  workingRef: MutableRefObject<boolean>,
+  setWorking: (w: { text: string, abortController?: AbortController } | undefined) => void,
+  setProgress: (a: number | undefined) => void,
+  videoStream: FFprobeStream | undefined,
+  duration?: number | undefined,
+  getRelevantTime: () => number,
+  maxLabelLength: number,
+  checkFileOpened: () => boolean,
+  invertCutSegments: boolean,
+  segmentsToChaptersOnly: boolean,
+  timecodePlaceholder: string,
+  parseTimecode: ParseTimecode,
+  appendFfmpegCommandLog: (args: string[]) => void,
 }) {
   // Segment related state
   const segCounterRef = useRef(0);
@@ -41,6 +55,19 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
 
   const [currentSegIndex, setCurrentSegIndex] = useState(0);
   const [deselectedSegmentIds, setDeselectedSegmentIds] = useState<Record<string, boolean>>({});
+
+  const [ffmpegParameters, setFfmpegParameters] = useState(() => Object.fromEntries(Object.entries(allFfmpegParameters).map(([dialogType, parameters]) => ([
+    dialogType,
+    Object.fromEntries(Object.entries(parameters).map(([k2, v2]) => [k2, v2.value])),
+  ] as const))));
+
+  const setFfmpegParametersForDialog = useCallback((dialogType: FfmpegDialog, newParams: Record<string, string>) => setFfmpegParameters((existing) => ({
+    ...existing,
+    [dialogType]: {
+      ...existing[dialogType],
+      ...newParams,
+    },
+  })), []);
 
   const isSegmentSelected = useCallback(({ segId }: { segId: string }) => !deselectedSegmentIds[segId], [deselectedSegmentIds]);
 
@@ -81,26 +108,39 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
   }, [clearSegCounter, createIndexedSegment, setCutSegments]);
 
   const detectSegments = useCallback(async ({ name, workingText, errorText, fn }: {
-    name: string, workingText: string, errorText: string, fn: () => Promise<SegmentBase[]>,
+    name: string,
+    workingText: string,
+    errorText: string,
+    fn: () => Promise<{ detectedSegments: SegmentBase[], ffmpegArgs: string[] }>,
   }) => {
     if (!filePath) return;
     if (workingRef.current) return;
     try {
       setWorking({ text: workingText });
-      setCutProgress(0);
+      setProgress(0);
 
-      const newSegments = await fn();
-      console.log(name, newSegments);
-      loadCutSegments(newSegments, true);
+      const { detectedSegments, ffmpegArgs } = await fn();
+      appendFfmpegCommandLog(ffmpegArgs);
+
+      console.log(name, detectedSegments);
+      loadCutSegments(detectedSegments, true);
     } catch (err) {
       if (!(err instanceof Error && err.name === 'AbortError')) handleError(errorText, err);
     } finally {
       setWorking(undefined);
-      setCutProgress(undefined);
+      setProgress(undefined);
     }
-  }, [filePath, workingRef, setWorking, setCutProgress, loadCutSegments]);
+  }, [filePath, workingRef, setWorking, setProgress, appendFfmpegCommandLog, loadCutSegments]);
 
   const getSegApparentEnd = useCallback((seg: SegmentBase) => getSegApparentEnd2(seg, duration), [duration]);
+
+  // must clone tags because scope is mutable (editable by expression)
+  const getScopeSegment = useCallback((seg: Pick<StateSegment, 'name' | 'start' | 'end' | 'tags'>, index: number): ScopeSegment => {
+    const start = getSegApparentStart(seg);
+    const end = getSegApparentEnd(seg);
+
+    return { index, label: seg.name, start, end, duration: end - start, tags: { ...seg.tags } };
+  }, [getSegApparentEnd]);
 
   const getApparentCutSegments = useCallback((segments: StateSegment[]) => segments.map((cutSegment) => ({
     ...cutSegment,
@@ -129,39 +169,55 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
 
   const selectedSegmentsRaw = useMemo(() => apparentCutSegments.filter((segment) => isSegmentSelected(segment)), [apparentCutSegments, isSegmentSelected]);
 
+  const getFfmpegParameters = useCallback((key: FfmpegDialog) => {
+    const parameters = ffmpegParameters[key];
+    invariant(parameters);
+    return parameters;
+  }, [ffmpegParameters]);
+
   const detectBlackScenes = useCallback(async () => {
-    const filterOptions = await showParametersDialog({ title: i18n.t('Enter parameters'), parameters: ffmpegParameters.blackdetect(), docUrl: 'https://ffmpeg.org/ffmpeg-filters.html#blackdetect' });
-    if (filterOptions == null) return;
+    const dialogType = 'blackdetect';
+    const parameters = await showParametersDialog({ title: i18n.t('Enter parameters'), dialogType, parameters: getFfmpegParameters(dialogType), docUrl: 'https://ffmpeg.org/ffmpeg-filters.html#blackdetect' });
+    if (parameters == null) return;
+    const { mode, ...filterOptions } = parameters;
+    setFfmpegParametersForDialog(dialogType, parameters);
+    invariant(mode === '1' || mode === '2');
     invariant(filePath != null);
-    await detectSegments({ name: 'blackScenes', workingText: i18n.t('Detecting black scenes'), errorText: i18n.t('Failed to detect black scenes'), fn: async () => blackDetect({ filePath, filterOptions, onProgress: setCutProgress, from: currentApparentCutSeg.start, to: currentApparentCutSeg.end }) });
-  }, [currentApparentCutSeg.end, currentApparentCutSeg.start, detectSegments, filePath, setCutProgress]);
+    await detectSegments({ name: 'blackScenes', workingText: i18n.t('Detecting black scenes'), errorText: i18n.t('Failed to detect black scenes'), fn: async () => blackDetect({ filePath, filterOptions, boundingMode: mode === '1', onProgress: setProgress, from: currentApparentCutSeg.start, to: currentApparentCutSeg.end }) });
+  }, [getFfmpegParameters, setFfmpegParametersForDialog, filePath, detectSegments, setProgress, currentApparentCutSeg.start, currentApparentCutSeg.end]);
 
   const detectSilentScenes = useCallback(async () => {
-    const filterOptions = await showParametersDialog({ title: i18n.t('Enter parameters'), parameters: ffmpegParameters.silencedetect(), docUrl: 'https://ffmpeg.org/ffmpeg-filters.html#silencedetect' });
-    if (filterOptions == null) return;
+    const dialogType = 'silencedetect';
+    const parameters = await showParametersDialog({ title: i18n.t('Enter parameters'), dialogType, parameters: getFfmpegParameters(dialogType), docUrl: 'https://ffmpeg.org/ffmpeg-filters.html#silencedetect' });
+    if (parameters == null) return;
+    setFfmpegParametersForDialog(dialogType, parameters);
+    const { mode, ...filterOptions } = parameters;
+    invariant(mode === '1' || mode === '2');
     invariant(filePath != null);
-    await detectSegments({ name: 'silentScenes', workingText: i18n.t('Detecting silent scenes'), errorText: i18n.t('Failed to detect silent scenes'), fn: async () => silenceDetect({ filePath, filterOptions, onProgress: setCutProgress, from: currentApparentCutSeg.start, to: currentApparentCutSeg.end }) });
-  }, [currentApparentCutSeg.end, currentApparentCutSeg.start, detectSegments, filePath, setCutProgress]);
+    await detectSegments({ name: 'silentScenes', workingText: i18n.t('Detecting silent scenes'), errorText: i18n.t('Failed to detect silent scenes'), fn: async () => silenceDetect({ filePath, filterOptions, boundingMode: mode === '1', onProgress: setProgress, from: currentApparentCutSeg.start, to: currentApparentCutSeg.end }) });
+  }, [currentApparentCutSeg.end, currentApparentCutSeg.start, detectSegments, filePath, getFfmpegParameters, setFfmpegParametersForDialog, setProgress]);
 
   const detectSceneChanges = useCallback(async () => {
-    const filterOptions = await showParametersDialog({ title: i18n.t('Enter parameters'), parameters: ffmpegParameters.sceneChange() });
-    if (filterOptions == null) return;
+    const dialogType = 'sceneChange';
+    const parameters = await showParametersDialog({ title: i18n.t('Enter parameters'), dialogType, parameters: getFfmpegParameters(dialogType) });
+    if (parameters == null) return;
+    setFfmpegParametersForDialog(dialogType, parameters);
     invariant(filePath != null);
     // eslint-disable-next-line prefer-destructuring
-    const minChange = filterOptions['minChange'];
+    const minChange = parameters['minChange'];
     invariant(minChange != null);
-    await detectSegments({ name: 'sceneChanges', workingText: i18n.t('Detecting scene changes'), errorText: i18n.t('Failed to detect scene changes'), fn: async () => ffmpegDetectSceneChanges({ filePath, minChange, onProgress: setCutProgress, from: currentApparentCutSeg.start, to: currentApparentCutSeg.end }) });
-  }, [currentApparentCutSeg.end, currentApparentCutSeg.start, detectSegments, filePath, setCutProgress]);
+    await detectSegments({ name: 'sceneChanges', workingText: i18n.t('Detecting scene changes'), errorText: i18n.t('Failed to detect scene changes'), fn: async () => ffmpegDetectSceneChanges({ filePath, minChange, onProgress: setProgress, from: currentApparentCutSeg.start, to: currentApparentCutSeg.end }) });
+  }, [currentApparentCutSeg.end, currentApparentCutSeg.start, detectSegments, filePath, getFfmpegParameters, setFfmpegParametersForDialog, setProgress]);
 
   const createSegmentsFromKeyframes = useCallback(async () => {
     if (!videoStream) return;
     invariant(filePath != null);
     const keyframes = (await readFrames({ filePath, from: currentApparentCutSeg.start, to: currentApparentCutSeg.end, streamIndex: videoStream.index })).filter((frame) => frame.keyframe);
-    const newSegments = mapTimesToSegments(keyframes.map((keyframe) => keyframe.time));
+    const newSegments = mapTimesToSegments(keyframes.map((keyframe) => keyframe.time), true);
     loadCutSegments(newSegments, true);
   }, [currentApparentCutSeg.end, currentApparentCutSeg.start, filePath, loadCutSegments, videoStream]);
 
-  const removeSegments = useCallback((removeSegmentIds) => {
+  const removeSegments = useCallback((removeSegmentIds: string[]) => {
     setCutSegments((existingSegments) => {
       if (existingSegments.length === 1 && existingSegments[0]!.start == null && existingSegments[0]!.end == null) {
         return existingSegments; // We are at initial segment, nothing more we can do (it cannot be removed)
@@ -177,7 +233,7 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     });
   }, [clearSegCounter, createInitialCutSegments, setCutSegments]);
 
-  const removeCutSegment = useCallback((index) => {
+  const removeCutSegment = useCallback((index: number) => {
     removeSegments([cutSegments[index]!.segId]);
   }, [cutSegments, removeSegments]);
 
@@ -243,21 +299,32 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     updateSegAtIndex(currentSegIndexSafe, { [type]: Math.min(Math.max(time, 0), duration) });
   }, [currentSegIndexSafe, getSegApparentEnd, currentCutSeg, duration, updateSegAtIndex]);
 
-  const modifySelectedSegmentTimes = useCallback(async (transformSegment, concurrency = 5) => {
-    if (duration == null) throw new Error();
-    const clampValue = (val) => Math.min(Math.max(val, 0), duration);
+  const clampValue = useCallback((val: number | undefined) => {
+    if (val == null) return undefined;
+    const clamped = Math.max(val, 0);
+    if (duration == null) return clamped;
+    return Math.min(clamped, duration);
+  }, [duration]);
 
-    let newSegments = await pMap(apparentCutSegments, async (segment) => {
+  const safeSetCutSegments = useCallback((newSegments: StateSegment[]) => {
+    const safeNewSegments = newSegments.map(({ start, end, ...rest }) => ({
+      ...rest,
+      start: clampValue(start),
+      end: clampValue(end),
+    })).filter((segment) => segment.end == null || segment.start == null || segment.end > segment.start);
+
+    setCutSegments(safeNewSegments.length > 0 ? safeNewSegments : createInitialCutSegments());
+  }, [clampValue, createInitialCutSegments, setCutSegments]);
+
+  const modifySelectedSegmentTimes = useCallback(async (transformSegment: <T extends ApparentCutSegment>(s: T) => Promise<T> | T, concurrency = 5) => {
+    const newSegments = await pMap(apparentCutSegments, async (segment) => {
       if (!isSegmentSelected(segment)) return segment; // pass thru non-selected segments
-      const newSegment = await transformSegment(segment);
-      newSegment.start = clampValue(newSegment.start);
-      newSegment.end = clampValue(newSegment.end);
-      return newSegment;
+
+      return transformSegment(segment);
     }, { concurrency });
-    newSegments = newSegments.filter((segment) => segment.end > segment.start);
-    if (newSegments.length === 0) setCutSegments(createInitialCutSegments());
-    else setCutSegments(newSegments);
-  }, [apparentCutSegments, createInitialCutSegments, duration, isSegmentSelected, setCutSegments]);
+
+    safeSetCutSegments(newSegments);
+  }, [apparentCutSegments, isSegmentSelected, safeSetCutSegments]);
 
   const shiftAllSegmentTimes = useCallback(async () => {
     const shift = await askForShiftSegments({ inputPlaceholder: timecodePlaceholder, parseTimecode });
@@ -283,13 +350,13 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
       await modifySelectedSegmentTimes(async (segment) => {
         const newSegment = { ...segment };
 
-        async function align(key) {
+        const align = async (key: 'start' | 'end') => {
           const time = newSegment[key];
           if (filePath == null) throw new Error();
           const keyframe = await findKeyframeNearTime({ filePath, streamIndex: videoStream.index, time, mode });
           if (keyframe == null) throw new Error(`Cannot find any keyframe within 60 seconds of frame ${time}`);
           newSegment[key] = keyframe;
-        }
+        };
         if (startOrEnd.includes('start')) await align('start');
         if (startOrEnd.includes('end')) await align('end');
         return newSegment;
@@ -301,7 +368,7 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     }
   }, [filePath, videoStream, modifySelectedSegmentTimes, setWorking, workingRef]);
 
-  const updateSegOrder = useCallback((index, newOrder) => {
+  const updateSegOrder = useCallback((index: number, newOrder: number) => {
     if (newOrder > cutSegments.length - 1 || newOrder < 0) return;
     const newSegments = [...cutSegments];
     const removedSeg = newSegments.splice(index, 1)[0];
@@ -311,7 +378,7 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     setCurrentSegIndex(newOrder);
   }, [cutSegments, setCurrentSegIndex, setCutSegments]);
 
-  const updateSegOrders = useCallback((newOrders) => {
+  const updateSegOrders = useCallback((newOrders: string[]) => {
     const newSegments = sortBy(cutSegments, (seg) => newOrders.indexOf(seg.segId));
     const newCurrentSegIndex = newOrders.indexOf(currentCutSeg.segId);
     setCutSegments(newSegments);
@@ -324,9 +391,6 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
 
   const addSegment = useCallback(() => {
     try {
-      // Cannot add if prev seg is not finished
-      if (currentCutSeg.start === undefined && currentCutSeg.end === undefined) return;
-
       const suggestedStart = getRelevantTime();
       /* if (keyframeCut) {
         const keyframeAlignedStart = getSafeCutTime(suggestedStart, true);
@@ -335,19 +399,25 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
 
       if (duration == null || suggestedStart >= duration) return;
 
-      const cutSegmentsNew = [
-        ...cutSegments,
-        createIndexedSegment({ segment: { start: suggestedStart }, incrementCount: true }),
-      ];
+      const newSegment = createIndexedSegment({ segment: { start: suggestedStart }, incrementCount: true });
+
+      // if initial segment, replace it instead
+      const cutSegmentsNew = cutSegments.length === 1 && cutSegments[0]!.start === undefined && cutSegments[0]!.end === undefined
+        ? [
+          newSegment,
+        ] : [
+          ...cutSegments,
+          newSegment,
+        ];
 
       setCutSegments(cutSegmentsNew);
       setCurrentSegIndex(cutSegmentsNew.length - 1);
     } catch (err) {
       console.error(err);
     }
-  }, [currentCutSeg.start, currentCutSeg.end, getRelevantTime, duration, cutSegments, createIndexedSegment, setCutSegments, setCurrentSegIndex]);
+  }, [getRelevantTime, duration, cutSegments, createIndexedSegment, setCutSegments, setCurrentSegIndex]);
 
-  const duplicateSegment = useCallback((segment) => {
+  const duplicateSegment = useCallback((segment: Pick<StateSegment, 'start' | 'end'> & Partial<Pick<StateSegment, 'name'>>) => {
     try {
       // Cannot duplicate if seg is not finished
       if (segment.start === undefined && segment.end === undefined) return;
@@ -407,7 +477,7 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     }
   }, [checkFileOpened, getRelevantTime, setCutTime]);
 
-  const onLabelSegment = useCallback(async (index) => {
+  const onLabelSegment = useCallback(async (index: number) => {
     const { name } = cutSegments[index]!;
     const value = await labelSegmentDialog({ currentName: name, maxLength: maxLabelLength });
     if (value != null) updateSegAtIndex(index, { name: value });
@@ -434,7 +504,7 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     const segment = cutSegments[firstSegmentAtCursorIndex];
     if (segment == null) throw new Error();
 
-    const getNewName = (oldName, suffix) => oldName && `${segment.name} ${suffix}`;
+    const getNewName = (oldName: string, suffix: string) => oldName && `${segment.name} ${suffix}`;
 
     const firstPart = createIndexedSegment({ segment: { name: getNewName(segment.name, '1'), start: segment.start, end: relevantTime }, incrementCount: false });
     const secondPart = createIndexedSegment({ segment: { name: getNewName(segment.name, '2'), start: relevantTime, end: segment.end }, incrementCount: true });
@@ -480,16 +550,12 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
   }, [currentCutSeg, cutSegments, enableSegments]);
 
   const onSelectSegmentsByExpr = useCallback(async () => {
-    async function matchSegment(seg: StateSegment, expr: string) {
-      const start = getSegApparentStart(seg);
-      const end = getSegApparentEnd(seg);
-      // must clone tags because scope is mutable (editable by expression)
-      const scopeSegment: ScopeSegment = { label: seg.name, start, end, duration: end - start, tags: { ...seg.tags } };
-      return (await safeishEval(expr, { segment: scopeSegment })) === true;
-    }
+    const matchSegment = async (seg: StateSegment, index: number, expr: string) => (
+      (await safeishEval(expr, { segment: getScopeSegment(seg, index) })) === true
+    );
 
-    const getSegmentsToEnable = async (expr: string) => (await pMap(cutSegments, async (seg) => (
-      ((await matchSegment(seg, expr)) ? [seg] : [])
+    const getSegmentsToEnable = async (expr: string) => (await pMap(cutSegments, async (seg, index) => (
+      ((await matchSegment(seg, index, expr)) ? [seg] : [])
     ), { concurrency: 5 })).flat();
 
     const value = await selectSegmentsByExprDialog(async (v: string) => {
@@ -497,6 +563,7 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
         if (v.trim().length === 0) return i18n.t('Please enter a JavaScript expression.');
         const segments = await getSegmentsToEnable(v);
         if (segments.length === 0) return i18n.t('No segments match this expression.');
+        if (segments.length === cutSegments.length) return i18n.t('All segments match this expression.');
         return undefined;
       } catch (err) {
         if (err instanceof Error) {
@@ -509,7 +576,54 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     if (value == null) return;
     const segmentsToEnable = await getSegmentsToEnable(value);
     enableSegments(segmentsToEnable);
-  }, [cutSegments, enableSegments, getSegApparentEnd]);
+  }, [cutSegments, enableSegments, getScopeSegment]);
+
+  const onMutateSegmentsByExpr = useCallback(async () => {
+    async function mutateSegment(seg: StateSegment, index: number, expr: string) {
+      const response = (await safeishEval(expr, { segment: getScopeSegment(seg, index) }));
+      invariant(typeof response === 'object' && response != null, i18n.t('The expression must return an object'));
+      const ret: Partial<Pick<StateSegment, 'name' | 'start' | 'end' | 'tags'>> = {};
+      if ('label' in response) {
+        if (typeof response.label !== 'string') throw new Error(i18n.t('"{{property}}" must be a string', { property: 'label' }));
+        ret.name = response.label;
+      }
+      if ('start' in response) {
+        if (typeof response.start !== 'number') throw new Error(i18n.t('"{{property}}" must be a number', { property: 'start' }));
+        ret.start = response.start;
+      }
+      if ('end' in response) {
+        if (typeof response.end !== 'number') throw new Error(i18n.t('"{{property}}" must be a number', { property: 'end' }));
+        ret.end = response.end;
+      }
+      if ('tags' in response) {
+        const tags = segmentTagsSchema.safeParse(response.tags);
+        if (!tags.success) throw new Error(i18n.t('"{{property}}" must be an object of strings', { property: 'tags' }));
+        ret.tags = tags.data;
+      }
+      return ret;
+    }
+
+    const mutateSegments = async (expr: string) => (await pMap(cutSegments, async (seg, index) => ({
+      ...seg,
+      ...(isSegmentSelected(seg) && await mutateSegment(seg, index, expr)),
+    }), { concurrency: 5 })).flat();
+
+    const value = await mutateSegmentsByExprDialog(async (v: string) => {
+      try {
+        if (v.trim().length === 0) return i18n.t('Please enter a JavaScript expression.');
+        await mutateSegments(v);
+        return undefined;
+      } catch (err) {
+        if (err instanceof Error) {
+          return i18n.t('Expression failed: {{errorMessage}}', { errorMessage: err.message });
+        }
+        throw err;
+      }
+    });
+
+    if (value == null) return;
+    safeSetCutSegments(await mutateSegments(value));
+  }, [cutSegments, getScopeSegment, isSegmentSelected, safeSetCutSegments]);
 
   const onLabelSelectedSegments = useCallback(async () => {
     if (selectedSegmentsRaw.length === 0) return;
@@ -539,8 +653,8 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
 
   const removeSelectedSegments = useCallback(() => removeSegments(selectedSegmentsRaw.map((seg) => seg.segId)), [removeSegments, selectedSegmentsRaw]);
 
-  const selectOnlySegment = useCallback((seg) => setDeselectedSegmentIds(Object.fromEntries(cutSegments.filter((s) => s.segId !== seg.segId).map((s) => [s.segId, true]))), [cutSegments]);
-  const toggleSegmentSelected = useCallback((seg) => setDeselectedSegmentIds((existing) => ({ ...existing, [seg.segId]: !existing[seg.segId] })), []);
+  const selectOnlySegment = useCallback((seg: Pick<StateSegment, 'segId'>) => setDeselectedSegmentIds(Object.fromEntries(cutSegments.filter((s) => s.segId !== seg.segId).map((s) => [s.segId, true]))), [cutSegments]);
+  const toggleSegmentSelected = useCallback((seg: Pick<StateSegment, 'segId'>) => setDeselectedSegmentIds((existing) => ({ ...existing, [seg.segId]: !existing[seg.segId] })), []);
   const deselectAllSegments = useCallback(() => setDeselectedSegmentIds(Object.fromEntries(cutSegments.map((s) => [s.segId, true]))), [cutSegments]);
   const invertSelectedSegments = useCallback(() => setDeselectedSegmentIds((existing) => Object.fromEntries(cutSegments.map((s) => [s.segId, !existing[s.segId]]))), [cutSegments]);
   const selectAllSegments = useCallback(() => setDeselectedSegmentIds({}), []);
@@ -604,6 +718,7 @@ function useSegments({ filePath, workingRef, setWorking, setCutProgress, videoSt
     removeSelectedSegments,
     onSelectSegmentsByLabel,
     onSelectSegmentsByExpr,
+    onMutateSegmentsByExpr,
     toggleSegmentSelected,
     selectOnlySegment,
     setCutTime,

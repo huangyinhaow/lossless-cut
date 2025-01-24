@@ -1,4 +1,4 @@
-import { CSSProperties, Dispatch, SetStateAction, memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { CSSProperties, ClipboardEvent, Dispatch, FormEvent, SetStateAction, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { MdRotate90DegreesCcw } from 'react-icons/md';
 import { useTranslation } from 'react-i18next';
@@ -100,7 +100,7 @@ const CutTimeInput = memo(({ darkMode, cutTime, setCutTime, startTimeOffset, see
     border, borderRadius: 5, backgroundColor: 'var(--gray5)', transition: darkModeTransition, fontSize: 13, textAlign: 'center', padding: '1px 5px', marginTop: 0, marginBottom: 0, marginLeft: isStart ? 0 : 5, marginRight: isStart ? 5 : 0, boxSizing: 'border-box', fontFamily: 'inherit', width: 90, outline: 'none',
   };
 
-  const trySetTime = useCallback((timeWithOffset) => {
+  const trySetTime = useCallback((timeWithOffset: number) => {
     const timeWithoutOffset = Math.max(timeWithOffset - startTimeOffset, 0);
     try {
       setCutTime(isStart ? 'start' : 'end', timeWithoutOffset);
@@ -113,7 +113,7 @@ const CutTimeInput = memo(({ darkMode, cutTime, setCutTime, startTimeOffset, see
     }
   }, [isStart, seekAbs, setCutTime, startTimeOffset]);
 
-  const handleSubmit = useCallback((e) => {
+  const handleSubmit = useCallback((e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
     // Don't proceed if not a valid time value
@@ -123,7 +123,7 @@ const CutTimeInput = memo(({ darkMode, cutTime, setCutTime, startTimeOffset, see
     trySetTime(timeWithOffset);
   }, [cutTimeManual, parseTimecode, trySetTime]);
 
-  const parseAndSetCutTime = useCallback((text) => {
+  const parseAndSetCutTime = useCallback((text: string) => {
     // Don't proceed if not a valid time value
     const timeWithOffset = parseTimecode(text);
     if (timeWithOffset === undefined) return;
@@ -131,13 +131,13 @@ const CutTimeInput = memo(({ darkMode, cutTime, setCutTime, startTimeOffset, see
     trySetTime(timeWithOffset);
   }, [parseTimecode, trySetTime]);
 
-  function handleCutTimeInput(text) {
+  function handleCutTimeInput(text: string) {
     setCutTimeManual(text);
 
     if (isExactDurationMatch(text)) parseAndSetCutTime(text);
   }
 
-  const tryPaste = useCallback((clipboardText) => {
+  const tryPaste = useCallback((clipboardText: string) => {
     try {
       setCutTimeManual(clipboardText);
       parseAndSetCutTime(clipboardText);
@@ -146,7 +146,7 @@ const CutTimeInput = memo(({ darkMode, cutTime, setCutTime, startTimeOffset, see
     }
   }, [parseAndSetCutTime]);
 
-  const handleCutTimePaste = useCallback((e) => {
+  const handleCutTimePaste = useCallback((e: ClipboardEvent<HTMLInputElement>) => {
     e.preventDefault();
 
     try {
@@ -193,10 +193,10 @@ function BottomBar({
   darkMode, setDarkMode,
   toggleShowThumbnails, toggleWaveformMode, waveformMode, showThumbnails,
   outputPlaybackRate, setOutputPlaybackRate,
-  formatTimecode, parseTimecode,
+  formatTimecode, parseTimecode, playbackRate,
 }: {
   zoom: number,
-  setZoom: Dispatch<SetStateAction<number>>,
+  setZoom: (fn: (z: number) => number) => void,
   timelineToggleComfortZoom: () => void,
   isRotationSet: boolean,
   rotation: number,
@@ -242,6 +242,7 @@ function BottomBar({
   setOutputPlaybackRate: (v: number) => void,
   formatTimecode: FormatTimecode,
   parseTimecode: ParseTimecode,
+  playbackRate: number,
 }) {
   const { t } = useTranslation();
   const { getSegColor } = useSegColors();
@@ -286,7 +287,12 @@ function BottomBar({
     if (newRate != null) setOutputPlaybackRate(newRate);
   }, [detectedFps, outputPlaybackRate, setOutputPlaybackRate]);
 
-  function renderJumpCutpointButton(direction) {
+  const playbackRateRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    playbackRateRef.current?.animate([{ transform: 'scale(1.7)', color: 'var(--gray12)' }, {}], { duration: 200 });
+  }, [playbackRate]);
+
+  function renderJumpCutpointButton(direction: number) {
     const newIndex = currentSegIndexSafe + direction;
     const seg = cutSegments[newIndex];
 
@@ -456,7 +462,7 @@ function BottomBar({
 
             <div role="button" style={{ marginRight: 5, marginLeft: 10 }} title={t('Zoom')} onClick={timelineToggleComfortZoom}>{Math.floor(zoom)}x</div>
 
-            <Select style={{ height: 20, flexBasis: 85, flexGrow: 0 }} value={zoomOptions.includes(zoom) ? zoom.toString() : ''} title={t('Zoom')} onChange={withBlur((e) => setZoom(parseInt(e.target.value, 10)))}>
+            <Select style={{ height: 20, flexBasis: 85, flexGrow: 0 }} value={zoomOptions.includes(zoom) ? zoom.toString() : ''} title={t('Zoom')} onChange={withBlur((e) => setZoom(() => parseInt(e.target.value, 10)))}>
               <option key="" value="" disabled>{t('Zoom')}</option>
               {zoomOptions.map((val) => (
                 <option key={val} value={String(val)}>{t('Zoom')} {val}x</option>
@@ -468,6 +474,8 @@ function BottomBar({
             )}
 
             <IoMdSpeedometer title={t('Change FPS')} style={{ padding: '0 .2em', fontSize: '1.3em' }} role="button" onClick={handleChangePlaybackRateClick} />
+
+            <div ref={playbackRateRef} title={t('Playback rate')} style={{ color: 'var(--gray11)', fontSize: '.7em', marginLeft: '.1em' }}>{playbackRate.toFixed(1)}</div>
           </>
         )}
 
