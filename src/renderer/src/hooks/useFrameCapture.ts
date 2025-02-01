@@ -1,17 +1,16 @@
 import dataUriToBuffer from 'data-uri-to-buffer';
 import pMap from 'p-map';
 import { useCallback } from 'react';
-import type * as FsPromises from 'node:fs/promises';
 
 import { getSuffixedOutPath, getOutDir, transferTimestamps, getSuffixedFileName, getOutPath, escapeRegExp, fsOperationWithRetry } from '../util';
 import { getNumDigits } from '../segments';
 
-import { captureFrame as ffmpegCaptureFrame, captureFrames as ffmpegCaptureFrames } from '../ffmpeg';
+import * as ffmpeg from '../ffmpeg';
 import { FormatTimecode } from '../types';
 import { CaptureFormat } from '../../../../types';
 
 const mime = window.require('mime-types');
-const { rename, readdir, writeFile }: typeof FsPromises = window.require('fs/promises');
+const { rename, readdir, writeFile } = window.require('fs/promises');
 
 
 function getFrameFromVideo(video: HTMLVideoElement, format: CaptureFormat, quality: number) {
@@ -26,9 +25,23 @@ function getFrameFromVideo(video: HTMLVideoElement, format: CaptureFormat, quali
   return dataUriToBuffer(dataUri);
 }
 
-export default ({ formatTimecode, treatOutputFileModifiedTimeAsStart }: { formatTimecode: FormatTimecode, treatOutputFileModifiedTimeAsStart?: boolean | undefined | null }) => {
+export default ({ appendFfmpegCommandLog, formatTimecode, treatOutputFileModifiedTimeAsStart }: {
+  appendFfmpegCommandLog: (args: string[]) => void,
+  formatTimecode: FormatTimecode,
+  treatOutputFileModifiedTimeAsStart?: boolean | undefined | null,
+}) => {
   const captureFramesRange = useCallback(async ({ customOutDir, filePath, fps, fromTime, toTime, estimatedMaxNumFiles, captureFormat, quality, filter, onProgress, outputTimestamps }: {
-    customOutDir, filePath: string, fps: number, fromTime: number, toTime: number, estimatedMaxNumFiles: number, captureFormat: CaptureFormat, quality: number, filter?: string | undefined, onProgress: (a: number) => void, outputTimestamps: boolean
+    customOutDir: string | undefined,
+    filePath: string,
+    fps: number,
+    fromTime: number,
+    toTime: number,
+    estimatedMaxNumFiles: number,
+    captureFormat: CaptureFormat,
+    quality: number,
+    filter?: string | undefined,
+    onProgress: (a: number) => void,
+    outputTimestamps: boolean,
   }) => {
     const getSuffix = (prefix: string) => `${prefix}.${captureFormat}`;
 
@@ -39,7 +52,8 @@ export default ({ formatTimecode, treatOutputFileModifiedTimeAsStart }: { format
       const outPathTemplate = getSuffixedOutPath({ customOutDir, filePath, nameSuffix: nameTemplateSuffix });
       const firstFileOutPath = getSuffixedOutPath({ customOutDir, filePath, nameSuffix });
 
-      await ffmpegCaptureFrames({ from: fromTime, to: toTime, videoPath: filePath, outPathTemplate, captureFormat, quality, filter, onProgress });
+      const args = await ffmpeg.captureFrames({ from: fromTime, to: toTime, videoPath: filePath, outPathTemplate, captureFormat, quality, filter, onProgress });
+      appendFfmpegCommandLog(args);
 
       return firstFileOutPath;
     }
@@ -47,7 +61,8 @@ export default ({ formatTimecode, treatOutputFileModifiedTimeAsStart }: { format
     // see https://github.com/mifi/lossless-cut/issues/1139
     const tmpSuffix = 'llc-tmp-frame-capture-';
     const outPathTemplate = getSuffixedOutPath({ customOutDir, filePath, nameSuffix: getSuffix(`${tmpSuffix}%d`) });
-    await ffmpegCaptureFrames({ from: fromTime, to: toTime, videoPath: filePath, outPathTemplate, captureFormat, quality, filter, framePts: true, onProgress });
+    const args = await ffmpeg.captureFrames({ from: fromTime, to: toTime, videoPath: filePath, outPathTemplate, captureFormat, quality, filter, framePts: true, onProgress });
+    appendFfmpegCommandLog(args);
 
     const outDir = getOutDir(customOutDir, filePath);
     const files = await readdir(outDir);
@@ -73,7 +88,7 @@ export default ({ formatTimecode, treatOutputFileModifiedTimeAsStart }: { format
     }, { concurrency: 1 });
 
     return outPaths[0];
-  }, [formatTimecode]);
+  }, [appendFfmpegCommandLog, formatTimecode]);
 
   const captureFrameFromFfmpeg = useCallback(async ({ customOutDir, filePath, fromTime, captureFormat, quality }: {
     customOutDir?: string | undefined, filePath: string, fromTime: number, captureFormat: CaptureFormat, quality: number,
@@ -81,11 +96,12 @@ export default ({ formatTimecode, treatOutputFileModifiedTimeAsStart }: { format
     const time = formatTimecode({ seconds: fromTime, fileNameFriendly: true });
     const nameSuffix = `${time}.${captureFormat}`;
     const outPath = getSuffixedOutPath({ customOutDir, filePath, nameSuffix });
-    await ffmpegCaptureFrame({ timestamp: fromTime, videoPath: filePath, outPath, quality });
+    const args = await ffmpeg.captureFrame({ timestamp: fromTime, videoPath: filePath, outPath, quality });
+    appendFfmpegCommandLog(args);
 
     await transferTimestamps({ inPath: filePath, outPath, cutFrom: fromTime, treatOutputFileModifiedTimeAsStart });
     return outPath;
-  }, [formatTimecode, treatOutputFileModifiedTimeAsStart]);
+  }, [appendFfmpegCommandLog, formatTimecode, treatOutputFileModifiedTimeAsStart]);
 
   const captureFrameFromTag = useCallback(async ({ customOutDir, filePath, currentTime, captureFormat, video, quality }: {
     customOutDir?: string | undefined, filePath: string, currentTime: number, captureFormat: CaptureFormat, video: HTMLVideoElement, quality: number,

@@ -42,6 +42,11 @@ export type TimecodeFormat = 'timecodeWithDecimalFraction' | 'frameCount' | 'tim
 
 export type AvoidNegativeTs = 'make_zero' | 'auto' | 'make_non_negative' | 'disabled';
 
+export type ModifierKey = 'ctrl' | 'shift' | 'alt' | 'meta';
+
+export type PreserveMetadata = 'default' | 'nonglobal' | 'none'
+
+
 export interface Config {
   captureFormat: CaptureFormat,
   customOutDir: string | undefined,
@@ -62,15 +67,19 @@ export interface Config {
   wheelSensitivity: number,
   language: LanguageKey | undefined,
   ffmpegExperimental: boolean,
+  preserveChapters: boolean,
+  preserveMetadata: PreserveMetadata,
+  preserveMetadataOnMerge: boolean,
   preserveMovData: boolean,
   movFastStart: boolean,
   avoidNegativeTs: AvoidNegativeTs,
   hideNotifications: 'all' | undefined,
+  hideOsNotifications: 'all' | undefined,
   autoLoadTimecode: boolean,
   segmentsToChapters: boolean,
-  preserveMetadataOnMerge: boolean,
   simpleMode: boolean,
   outSegTemplate: string | undefined,
+  mergedFileTemplate: string | undefined,
   keyboardSeekAccFactor: number,
   keyboardNormalSeekSpeed: number,
   keyboardSeekSpeed2: number,
@@ -80,12 +89,15 @@ export interface Config {
   outFormatLocked: string | undefined,
   safeOutputFileName: boolean,
   windowBounds: { x: number, y: number, width: number, height: number } | undefined,
+  storeWindowBounds: boolean,
   enableAutoHtml5ify: boolean,
   keyBindings: KeyBinding[],
   customFfPath: string | undefined,
   storeProjectInWorkingDir: boolean,
   enableOverwriteOutput: boolean,
-  mouseWheelZoomModifierKey: string,
+  mouseWheelZoomModifierKey: ModifierKey,
+  mouseWheelFrameSeekModifierKey: ModifierKey,
+  mouseWheelKeyframeSeekModifierKey: ModifierKey,
   captureFrameMethod: 'videotag' | 'ffmpeg',
   captureFrameQuality: number,
   captureFrameFileNameFormat: 'timestamp' | 'index',
@@ -99,6 +111,7 @@ export interface Config {
   preferStrongColors: boolean,
   outputFileNameMinZeroPadding: number,
   cutFromAdjustmentFrames: number,
+  cutToAdjustmentFrames: number,
   invertTimelineScroll: boolean | undefined,
 }
 
@@ -106,9 +119,10 @@ export interface Waveform {
   buffer: Buffer,
 }
 
-export interface ApiKeyboardActionRequest {
+export interface ApiActionRequest {
   id: number
   action: string
+  args?: unknown[] | undefined,
 }
 
 export type Html5ifyMode = 'fastest' | 'fast-audio-remux' | 'fast-audio' | 'fast' | 'slow' | 'slow-audio' | 'slowest';
@@ -117,6 +131,7 @@ export type WaveformMode = 'big-waveform' | 'waveform';
 
 // This is the contract with the user, see https://github.com/mifi/lossless-cut/blob/master/expressions.md
 export interface ScopeSegment {
+  index: number,
   label: string,
   start: number,
   end: number,

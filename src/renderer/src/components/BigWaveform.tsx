@@ -1,12 +1,18 @@
-import { memo, useEffect, useState, useCallback, useRef, CSSProperties } from 'react';
+import { memo, useEffect, useState, useCallback, useRef, CSSProperties, MouseEventHandler, WheelEventHandler } from 'react';
 import { Spinner } from 'evergreen-ui';
 
 import { ffmpegExtractWindow } from '../util/constants';
 import { RenderableWaveform } from '../types';
 
 
-function BigWaveform({ waveforms, relevantTime, playing, durationSafe, zoom, seekRel }: {
-  waveforms: RenderableWaveform[], relevantTime: number, playing: boolean, durationSafe: number, zoom: number, seekRel: (a: number) => void,
+function BigWaveform({ waveforms, relevantTime, playing, durationSafe, zoom, seekRel, darkMode }: {
+  waveforms: RenderableWaveform[],
+  relevantTime: number,
+  playing: boolean,
+  durationSafe: number,
+  zoom: number,
+  seekRel: (a: number) => void,
+  darkMode: boolean,
 }) {
   const windowSize = ffmpegExtractWindow * 2;
   const windowStart = Math.max(0, relevantTime - windowSize);
@@ -32,9 +38,9 @@ function BigWaveform({ waveforms, relevantTime, playing, durationSafe, zoom, see
     e.preventDefault();
   }, [relevantTime]);
 
-  const scaleToTime = useCallback((v) => (((v) / getRect().width) * windowSize) / zoom, [getRect, windowSize, zoom]);
+  const scaleToTime = useCallback((v: number) => (((v) / getRect().width) * windowSize) / zoom, [getRect, windowSize, zoom]);
 
-  const handleMouseMove = useCallback((e) => {
+  const handleMouseMove = useCallback<MouseEventHandler<HTMLDivElement>>((e) => {
     if (mouseDownRef.current == null) return;
 
     seekRel(-scaleToTime(e.movementX));
@@ -42,11 +48,11 @@ function BigWaveform({ waveforms, relevantTime, playing, durationSafe, zoom, see
     e.preventDefault();
   }, [scaleToTime, seekRel]);
 
-  const handleWheel = useCallback((e) => {
+  const handleWheel = useCallback<WheelEventHandler<HTMLDivElement>>((e) => {
     seekRel(scaleToTime(e.deltaX));
   }, [scaleToTime, seekRel]);
 
-  const handleMouseUp = useCallback((e) => {
+  const handleMouseUp = useCallback<MouseEventHandler<HTMLDivElement>>((e) => {
     if (!mouseDownRef.current) return;
     mouseDownRef.current = undefined;
     e.preventDefault();
@@ -57,7 +63,7 @@ function BigWaveform({ waveforms, relevantTime, playing, durationSafe, zoom, see
     const startTime = Date.now();
 
     if (playing) {
-      let raf;
+      let raf: number;
       // eslint-disable-next-line no-inner-declarations
       function render() {
         raf = window.requestAnimationFrame(() => {
@@ -79,7 +85,7 @@ function BigWaveform({ waveforms, relevantTime, playing, durationSafe, zoom, see
     // eslint-disable-next-line jsx-a11y/no-static-element-interactions
     <div
       ref={containerRef}
-      style={{ height: '100%', width: '100%', position: 'relative', cursor: 'grab' }}
+      style={{ height: '100%', width: '100%', position: 'relative', cursor: 'grab', backgroundColor: 'var(--gray3)' }}
       onMouseDown={handleMouseDown}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
@@ -94,13 +100,13 @@ function BigWaveform({ waveforms, relevantTime, playing, durationSafe, zoom, see
 
         const style: CSSProperties = {
           pointerEvents: 'none',
-          backgroundColor: 'var(--gray3)',
           position: 'absolute',
           height: '100%',
           width: widthPercent,
           left: leftPercent,
           borderLeft: waveform.from === 0 ? '1px solid var(--gray11)' : undefined,
           borderRight: waveform.to >= durationSafe ? '1px solid var(--gray11)' : undefined,
+          filter: darkMode ? undefined : 'invert(1)',
         };
 
         if (waveform.url == null) {

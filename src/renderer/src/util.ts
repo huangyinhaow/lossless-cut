@@ -5,17 +5,17 @@ import prettyBytes from 'pretty-bytes';
 import sortBy from 'lodash/sortBy';
 import pRetry, { Options } from 'p-retry';
 import { ExecaError } from 'execa';
-import type * as FsPromises from 'node:fs/promises';
-import type * as FsExtra from 'fs-extra';
-import type { PlatformPath } from 'node:path';
 
 import isDev from './isDev';
-import Swal, { toast } from './swal';
+import Swal, { errorToast, toast } from './swal';
 import { ffmpegExtractWindow } from './util/constants';
+import { appName } from '../../main/common';
+import { DirectoryAccessDeclinedError, UnsupportedFileError } from '../errors';
+import { Html5ifyMode } from '../../../types';
 
-const { dirname, parse: parsePath, join, extname, isAbsolute, resolve, basename }: PlatformPath = window.require('path');
-const fsExtra: typeof FsExtra = window.require('fs-extra');
-const { stat, lstat, readdir, utimes, unlink }: typeof FsPromises = window.require('fs/promises');
+const { dirname, parse: parsePath, join, extname, isAbsolute, resolve, basename } = window.require('path');
+const fsExtra = window.require('fs-extra');
+const { stat, lstat, readdir, utimes, unlink } = window.require('fs/promises');
 const { ipcRenderer } = window.require('electron');
 const remote = window.require('@electron/remote');
 const { isWindows, isMac } = remote.require('./index.js');
@@ -50,6 +50,8 @@ export function getOutPath({ customOutDir, filePath, fileName }: { customOutDir?
   if (filePath == null) return undefined;
   return join(getOutDir(customOutDir, filePath), fileName);
 }
+
+export const getDownloadMediaOutPath = (customOutDir: string, fileName: string) => join(customOutDir, fileName);
 
 export const getSuffixedFileName = (filePath: string | undefined, nameSuffix: string) => `${getFileBaseName(filePath)}-${nameSuffix}`;
 
@@ -159,36 +161,19 @@ export async function transferTimestamps({ inPath, outPath, cutFrom = 0, cutTo =
   }
 }
 
-export function handleError(arg1: unknown, arg2?: unknown) {
-  console.error('handleError', arg1, arg2);
-
-  let msg;
-  let errorMsg;
-  if (typeof arg1 === 'string') msg = arg1;
-  else if (typeof arg2 === 'string') msg = arg2;
-
-  if (arg1 instanceof Error) errorMsg = arg1.message;
-  if (arg2 instanceof Error) errorMsg = arg2.message;
-
-  toast.fire({
-    icon: 'error',
-    title: msg || i18n.t('An error has occurred.'),
-    text: errorMsg ? errorMsg.slice(0, 300) : undefined,
-  });
-}
-
 export function filenamify(name: string) {
   return name.replaceAll(/[^\w.-]/g, '_');
 }
 
-export function withBlur(cb) {
-  return (e) => {
+// eslint-disable-next-line space-before-function-paren
+export function withBlur<T extends { target?: { blur?: () => unknown } | object }>(cb: (a: T) => void) {
+  return (e: T) => {
     cb(e);
-    e.target?.blur();
+    if (e.target && 'blur' in e.target) e.target?.blur?.();
   };
 }
 
-export function dragPreventer(ev) {
+export function dragPreventer(ev: DragEvent) {
   ev.preventDefault();
 }
 
@@ -211,20 +196,20 @@ export function getOutFileExtension({ isCustomFormatSelected, outFormat, filePat
   isCustomFormatSelected?: boolean, outFormat: string, filePath: string,
 }) {
   if (!isCustomFormatSelected) {
-    const ext = extname(filePath);
+    const inputExt = extname(filePath);
     // QuickTime is quirky about the file extension of mov files (has to be .mov)
     // https://github.com/mifi/lossless-cut/issues/1075#issuecomment-1072084286
-    const hasMovIncorrectExtension = outFormat === 'mov' && ext.toLowerCase() !== '.mov';
+    const hasMovIncorrectExtension = outFormat === 'mov' && inputExt.toLowerCase() !== '.mov';
 
-    // OK, just keep the current extension. Because most players will not care about the extension
-    if (!hasMovIncorrectExtension) return extname(filePath);
+    // OK, just keep the current extension. Because most other players will not care about the extension
+    if (!hasMovIncorrectExtension) return inputExt;
   }
 
   // user is changing format, must update extension too
   return `.${getExtensionForFormat(outFormat)}`;
 }
 
-export const hasDuplicates = (arr) => new Set(arr).size !== arr.length;
+export const hasDuplicates = (arr: unknown[]) => new Set(arr).size !== arr.length;
 
 // Need to resolve relative paths from the command line https://github.com/mifi/lossless-cut/issues/639
 export const resolvePathIfNeeded = (inPath: string) => (isAbsolute(inPath) ? inPath : resolve(inPath));
@@ -232,7 +217,7 @@ export const resolvePathIfNeeded = (inPath: string) => (isAbsolute(inPath) ? inP
 export const html5ifiedPrefix = 'html5ified-';
 export const html5dummySuffix = 'dummy';
 
-export async function findExistingHtml5FriendlyFile(fp, cod) {
+export async function findExistingHtml5FriendlyFile(fp: string, cod: string | undefined) {
   // The order is the priority we will search:
   const suffixes = ['slowest', 'slow-audio', 'slow', 'fast-audio-remux', 'fast-audio', 'fast', html5dummySuffix];
   const prefix = getSuffixedFileName(fp, html5ifiedPrefix);
@@ -265,13 +250,13 @@ export async function findExistingHtml5FriendlyFile(fp, cod) {
   };
 }
 
-export function getHtml5ifiedPath(cod: string | undefined, fp, type) {
+export function getHtml5ifiedPath(cod: string | undefined, fp: string, type: Html5ifyMode) {
   // See also inside ffmpegHtml5ify
   const ext = (isMac && ['slowest', 'slow', 'slow-audio'].includes(type)) ? 'mp4' : 'mkv';
   return getSuffixedOutPath({ customOutDir: cod, filePath: fp, nameSuffix: `${html5ifiedPrefix}${type}.${ext}` });
 }
 
-export async function deleteFiles({ paths, deleteIfTrashFails, signal }: { paths: string[], deleteIfTrashFails?: boolean, signal: AbortSignal }) {
+export async function deleteFiles({ paths, deleteIfTrashFails, signal }: { paths: string[], deleteIfTrashFails?: boolean | undefined, signal: AbortSignal }) {
   const failedToTrashFiles: string[] = [];
 
   // eslint-disable-next-line no-restricted-syntax
@@ -306,53 +291,130 @@ export const deleteDispositionValue = 'llc_disposition_remove';
 
 export const mirrorTransform = 'matrix(-1, 0, 0, 1, 0, 0)';
 
-export function isExecaError(err: unknown): err is Pick<ExecaError, 'stdout' | 'stderr'> {
-  return err instanceof Error && 'stdout' in err && 'stderr' in err;
+// todo this is not a correct assumption
+export type InvariantExecaError = ExecaError<{ encoding: 'utf8' }> | ExecaError<{ encoding: 'buffer' }>;
+
+// We can't use `instanceof ExecaError` because the error has been sent over the main-renderer bridge (@electron/remote)
+// so instead we just check if it has some of execa's specific error properties
+export function isExecaError(err: unknown): err is InvariantExecaError {
+  // https://github.com/sindresorhus/execa/blob/main/docs/api.md#resultfailed
+  return err instanceof Error && ('failed' in err && 'shortMessage' in err && 'isForcefullyTerminated' in err);
 }
 
-// I *think* Windows will throw error with code ENOENT if ffprobe/ffmpeg fails (execa), but other OS'es will return this error code if a file is not found, so it would be wrong to attribute it to exec failure.
-// see https://github.com/mifi/lossless-cut/issues/451
-export const isExecaFailure = (err): err is ExecaError => err.exitCode === 1 || (isWindows && err.code === 'ENOENT');
+export const isAbortedError = (err: unknown) => (
+  // execa killed (aborted by user). isTerminated because runningFfmpegs process.kill
+  (isExecaError(err) && (err.isCanceled || err.isTerminated))
+  || (err instanceof Error && err.name === 'AbortError')
+);
+
+export const getStdioString = (stdio: string | Uint8Array) => (stdio instanceof Uint8Array ? Buffer.from(stdio).toString('utf8') : stdio);
 
 // A bit hacky but it works, unless someone has a file called "No space left on device" ( ͡° ͜ʖ ͡°)
-export const isOutOfSpaceError = (err): err is ExecaError => (
-  err && isExecaFailure(err)
-  && typeof err.stderr === 'string' && err.stderr.includes('No space left on device')
+export const isOutOfSpaceError = (err: InvariantExecaError) => (
+  err.exitCode !== 0
+  && !!getStdioString(err.stderr)?.includes('No space left on device')
 );
+
+export const isMuxNotSupported = (err: InvariantExecaError) => (
+  err.exitCode !== 0
+  && err.stderr != null
+  && /Could not write header .*incorrect codec parameters .*Invalid argument/.test(getStdioString(err.stderr) ?? '')
+);
+
+export function handleError(arg1: unknown, arg2?: unknown) {
+  console.error('handleError', arg1, arg2);
+
+  let err: Error | undefined;
+  let str: string | undefined;
+
+  if (typeof arg1 === 'string') str = arg1;
+  else if (typeof arg2 === 'string') str = arg2;
+
+  if (arg1 instanceof Error) err = arg1;
+  else if (arg2 instanceof Error) err = arg2;
+
+  if (err instanceof UnsupportedFileError) {
+    errorToast(i18n.t('Unsupported file'));
+  } else {
+    Swal.fire({
+      icon: 'error',
+      title: str || i18n.t('An error has occurred.'),
+      text: err?.message ? err?.message.slice(0, 300) : undefined,
+    });
+  }
+}
+
+/**
+ * Run an operation with error handling
+ */
+export async function withErrorHandling(operation: () => Promise<void>, errorMsgOrFn?: string | ((err: unknown) => string)) {
+  try {
+    await operation();
+  } catch (err) {
+    if (err instanceof DirectoryAccessDeclinedError || isAbortedError(err)) return;
+
+    if (err instanceof UnsupportedFileError) {
+      errorToast(i18n.t('Unsupported file'));
+      return;
+    }
+
+    let errorMsg: string | undefined;
+    if (typeof errorMsgOrFn === 'string') errorMsg = errorMsgOrFn;
+    if (typeof errorMsgOrFn === 'function') errorMsg = errorMsgOrFn(err);
+    if (errorMsg != null) {
+      console.error(errorMsg, err);
+      handleError(errorMsg, err);
+    } else {
+      handleError(err);
+    }
+  }
+}
 
 export async function checkAppPath() {
   try {
-    const forceCheck = false;
-    // const forceCheck = isDev;
+    const forceCheckMs = false;
+    const forceCheckTitle = false;
     // this code is purposefully obfuscated to try to detect the most basic cloned app submissions to the MS Store
-    if (!isWindowsStoreBuild && !forceCheck) return;
     // eslint-disable-next-line no-useless-concat, one-var, one-var-declaration-per-line
-    const mf = 'mi' + 'fi.no', llc = 'Los' + 'slessC' + 'ut';
-    const appPath = isDev ? 'C:\\Program Files\\WindowsApps\\37672NoveltyStudio.MediaConverter_9.0.6.0_x64__vjhnv588cyf84' : remote.app.getAppPath();
-    const pathMatch = appPath.replaceAll('\\', '/').match(/Windows ?Apps\/([^/]+)/); // find the first component after WindowsApps
-    // example pathMatch: 37672NoveltyStudio.MediaConverter_9.0.6.0_x64__vjhnv588cyf84
-    if (!pathMatch) {
-      console.warn('Unknown path match', appPath);
-      return;
+    const mf = 'mi' + 'fi.no', ap = 'Los' + 'slessC' + 'ut';
+    let payload: string | undefined;
+    if (isWindowsStoreBuild || (isDev && forceCheckMs)) {
+      const appPath = isDev ? 'C:\\Program Files\\WindowsApps\\37672NoveltyStudio.MediaConverter_9.0.6.0_x64__vjhnv588cyf84' : remote.app.getAppPath();
+      const pathMatch = appPath.replaceAll('\\', '/').match(/Windows ?Apps\/([^/]+)/); // find the first component after WindowsApps
+      // example pathMatch: 37672NoveltyStudio.MediaConverter_9.0.6.0_x64__vjhnv588cyf84
+      if (!pathMatch) {
+        console.warn('Unknown path match', appPath);
+        return;
+      }
+      const pathSeg = pathMatch[1];
+      if (pathSeg == null) return;
+      if (pathSeg.startsWith(`57275${mf}.${ap}_`)) return;
+      // this will report the path and may return a msg
+      payload = `msstore-app-id:${pathSeg}`;
+      // and non ms store fakes:)
+    } else if (isMac || isWindows || (isDev && forceCheckTitle)) {
+      const { title } = document;
+      if (!title.includes(ap)) {
+        payload = `app-title:${title}`;
+      }
     }
-    const pathSeg = pathMatch[1];
-    if (pathSeg == null) return;
-    if (pathSeg.startsWith(`57275${mf}.${llc}_`)) return;
-    // this will report the path and may return a msg
-    const url = `https://losslesscut-analytics.mifi.no/${pathSeg.length}/${encodeURIComponent(btoa(pathSeg))}`;
-    // console.log('Reporting app', pathSeg, url);
-    const response = await ky(url).json<{ invalid?: boolean, title: string, text: string }>();
-    if (response.invalid) toast.fire({ timer: 60000, icon: 'error', title: response.title, text: response.text });
+
+    if (payload) {
+      const url = `https://losslesscut-analytics.mifi.no/${payload.length}/${encodeURIComponent(btoa(payload))}`;
+      // console.log('Reporting app', pathSeg, url);
+      const response = await ky(url).json<{ invalid?: boolean, title: string, text: string }>();
+      if (response.invalid) toast.fire({ timer: 60000, icon: 'error', title: response.title, text: response.text });
+    }
   } catch (err) {
     if (isDev) console.warn(err instanceof Error && err.message);
   }
 }
 
 // https://stackoverflow.com/a/2450976/6519037
-export function shuffleArray(arrayIn) {
+export function shuffleArray<T>(arrayIn: T[]) {
   const array = [...arrayIn];
   let currentIndex = array.length;
-  let randomIndex;
+  let randomIndex: number;
 
   // While there remain elements to shuffle...
   while (currentIndex !== 0) {
@@ -362,23 +424,24 @@ export function shuffleArray(arrayIn) {
 
     // And swap it with the current element.
     [array[currentIndex], array[randomIndex]] = [
-      array[randomIndex], array[currentIndex]];
+      array[randomIndex]!, array[currentIndex]!,
+    ] as const;
   }
 
   return array;
 }
 
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_Expressions#escaping
-export function escapeRegExp(string) {
+export function escapeRegExp(str: string) {
   // eslint-disable-next-line unicorn/better-regex
-  return string.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+  return str.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
 }
 
-export const readFileSize = async (path) => (await stat(path)).size;
+export const readFileSize = async (path: string) => (await stat(path)).size;
 
-export const readFileSizes = (paths) => pMap(paths, async (path) => readFileSize(path), { concurrency: 5 });
+export const readFileSizes = (paths: string[]) => pMap(paths, async (path) => readFileSize(path), { concurrency: 5 });
 
-export function checkFileSizes(inputSize, outputSize) {
+export function checkFileSizes(inputSize: number, outputSize: number) {
   const diff = Math.abs(outputSize - inputSize);
   const relDiff = diff / inputSize;
   const maxDiffPercent = 5;
@@ -388,19 +451,24 @@ export function checkFileSizes(inputSize, outputSize) {
   return undefined;
 }
 
-function setDocumentExtraTitle(extra) {
-  const baseTitle = 'LosslessCut';
-  document.title = extra != null ? `${baseTitle} - ${extra}` : baseTitle;
-}
-
-export function setDocumentTitle({ filePath, working, cutProgress }: { filePath?: string | undefined, working?: string | undefined, cutProgress?: number | undefined }) {
+export function setDocumentTitle({ filePath, working, progress }: {
+  filePath?: string | undefined,
+  working?: string | undefined,
+  progress?: number | undefined }) {
   const parts: string[] = [];
-  if (filePath) parts.push(basename(filePath));
+
   if (working) {
-    parts.push('-', working);
-    if (cutProgress != null) parts.push(`${(cutProgress * 100).toFixed(1)}%`);
+    if (progress != null) parts.push(`${(progress * 100).toFixed(1)}%`);
+    parts.push(working);
   }
-  setDocumentExtraTitle(parts.length > 0 ? parts.join(' ') : undefined);
+
+  if (filePath) {
+    parts.push(basename(filePath));
+  }
+
+  parts.push(appName);
+
+  document.title = parts.join(' - ');
 }
 
 export function mustDisallowVob() {
@@ -412,7 +480,7 @@ export function mustDisallowVob() {
   return false;
 }
 
-export async function readVideoTs(videoTsPath) {
+export async function readVideoTs(videoTsPath: string) {
   const files = await readdir(videoTsPath);
   const relevantFiles = files.filter((file) => /^vts_\d+_\d+\.vob$/i.test(file) && !/^vts_\d+_00\.vob$/i.test(file)); // skip menu
   const ret = sortBy(relevantFiles).map((file) => join(videoTsPath, file));
@@ -420,7 +488,7 @@ export async function readVideoTs(videoTsPath) {
   return ret;
 }
 
-export async function readDirRecursively(dirPath) {
+export async function readDirRecursively(dirPath: string) {
   const files = await readdir(dirPath, { recursive: true });
   const ret = (await pMap(files, async (path) => {
     if (['.DS_Store'].includes(basename(path))) return [];
@@ -436,15 +504,15 @@ export async function readDirRecursively(dirPath) {
   return ret;
 }
 
-export function getImportProjectType(filePath) {
+export function getImportProjectType(filePath: string) {
   if (filePath.endsWith('Summary.txt')) return 'dv-analyzer-summary-txt';
-  const edlFormatForExtension = { csv: 'csv', pbf: 'pbf', edl: 'mplayer', cue: 'cue', xml: 'xmeml', fcpxml: 'fcpxml' };
+  const edlFormatForExtension = { csv: 'csv', pbf: 'pbf', edl: 'edl', cue: 'cue', xml: 'xmeml', fcpxml: 'fcpxml' };
   const matchingExt = Object.keys(edlFormatForExtension).find((ext) => filePath.toLowerCase().endsWith(`.${ext}`));
   if (!matchingExt) return undefined;
   return edlFormatForExtension[matchingExt];
 }
 
-export const calcShouldShowWaveform = (zoomedDuration) => (zoomedDuration != null && zoomedDuration < ffmpegExtractWindow * 8);
-export const calcShouldShowKeyframes = (zoomedDuration) => (zoomedDuration != null && zoomedDuration < ffmpegExtractWindow * 8);
+export const calcShouldShowWaveform = (zoomedDuration: number | undefined) => (zoomedDuration != null && zoomedDuration < ffmpegExtractWindow * 8);
+export const calcShouldShowKeyframes = (zoomedDuration: number | undefined) => (zoomedDuration != null && zoomedDuration < ffmpegExtractWindow * 8);
 
 export const mediaSourceQualities = ['HD', 'SD', 'OG']; // OG is original

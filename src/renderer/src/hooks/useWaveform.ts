@@ -1,9 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import sortBy from 'lodash/sortBy';
 import { useThrottle } from '@uidotdev/usehooks';
-import { waveformColorDark, waveformColorLight } from '../colors';
 
-import { fixRemoteBuffer, renderWaveformPng } from '../ffmpeg';
+import { renderWaveformPng, safeCreateBlob } from '../ffmpeg';
 import { RenderableWaveform } from '../types';
 import { FFprobeStream } from '../../../../ffprobe';
 
@@ -11,8 +10,13 @@ import { FFprobeStream } from '../../../../ffprobe';
 const maxWaveforms = 100;
 // const maxWaveforms = 3; // testing
 
-export default ({ darkMode, filePath, relevantTime, duration, waveformEnabled, audioStream, ffmpegExtractWindow }: {
-  darkMode: boolean, filePath: string | undefined, relevantTime: number, duration: number | undefined, waveformEnabled: boolean, audioStream: FFprobeStream | undefined, ffmpegExtractWindow: number,
+export default ({ filePath, relevantTime, duration, waveformEnabled, audioStream, ffmpegExtractWindow }: {
+  filePath: string | undefined,
+  relevantTime: number,
+  duration: number | undefined,
+  waveformEnabled: boolean,
+  audioStream: FFprobeStream | undefined,
+  ffmpegExtractWindow: number,
 }) => {
   const creatingWaveformPromise = useRef<Promise<unknown>>();
   const [waveforms, setWaveforms] = useState<RenderableWaveform[]>([]);
@@ -21,8 +25,6 @@ export default ({ darkMode, filePath, relevantTime, duration, waveformEnabled, a
   useEffect(() => {
     waveformsRef.current = waveforms;
   }, [waveforms]);
-
-  const waveformColor = darkMode ? waveformColorDark : waveformColorLight;
 
   useEffect(() => {
     waveformsRef.current = [];
@@ -43,7 +45,7 @@ export default ({ darkMode, filePath, relevantTime, duration, waveformEnabled, a
       if (!shouldRun) return;
 
       try {
-        const promise = renderWaveformPng({ filePath, start: waveformStartTimeThrottled, duration: safeExtractDuration, color: waveformColor, streamIndex: audioStream.index });
+        const promise = renderWaveformPng({ filePath, start: waveformStartTimeThrottled, duration: safeExtractDuration, color: '##000000', streamIndex: audioStream.index });
         creatingWaveformPromise.current = promise;
 
         setWaveforms((currentWaveforms) => {
@@ -75,7 +77,7 @@ export default ({ darkMode, filePath, relevantTime, duration, waveformEnabled, a
 
           return {
             ...w,
-            url: URL.createObjectURL(new Blob([fixRemoteBuffer(buffer)], { type: 'image/png' })),
+            url: URL.createObjectURL(safeCreateBlob(buffer, { type: 'image/png' })),
           };
         }));
       } catch (err) {
@@ -88,7 +90,7 @@ export default ({ darkMode, filePath, relevantTime, duration, waveformEnabled, a
     return () => {
       aborted = true;
     };
-  }, [audioStream, filePath, safeExtractDuration, waveformColor, waveformEnabled, waveformStartTimeThrottled]);
+  }, [audioStream, filePath, safeExtractDuration, waveformEnabled, waveformStartTimeThrottled]);
 
   const lastWaveformsRef = useRef<RenderableWaveform[]>([]);
   useEffect(() => {
@@ -96,7 +98,10 @@ export default ({ darkMode, filePath, relevantTime, duration, waveformEnabled, a
     // Cleanup old
     // if (removedWaveforms.length > 0) console.log('cleanup waveforms', removedWaveforms.length);
     removedWaveforms.forEach((waveform) => {
-      if (waveform.url != null) URL.revokeObjectURL(waveform.url);
+      if (waveform.url != null) {
+        console.log('Cleanup waveform', waveform.from, waveform.to);
+        URL.revokeObjectURL(waveform.url);
+      }
     });
     lastWaveformsRef.current = waveforms;
   }, [waveforms]);

@@ -106,15 +106,19 @@ const defaults: Config = {
   wheelSensitivity: 0.2,
   language: undefined,
   ffmpegExperimental: false,
+  preserveChapters: true,
+  preserveMetadata: 'default',
+  preserveMetadataOnMerge: false,
   preserveMovData: false,
   movFastStart: true,
   avoidNegativeTs: 'make_zero',
   hideNotifications: undefined,
+  hideOsNotifications: undefined,
   autoLoadTimecode: false,
   segmentsToChapters: false,
-  preserveMetadataOnMerge: false,
   simpleMode: true,
   outSegTemplate: undefined,
+  mergedFileTemplate: undefined,
   keyboardSeekAccFactor: 1.03,
   keyboardNormalSeekSpeed: 1,
   keyboardSeekSpeed2: 10,
@@ -130,6 +134,8 @@ const defaults: Config = {
   storeProjectInWorkingDir: true,
   enableOverwriteOutput: true,
   mouseWheelZoomModifierKey: 'ctrl',
+  mouseWheelFrameSeekModifierKey: 'alt',
+  mouseWheelKeyframeSeekModifierKey: 'shift',
   captureFrameMethod: 'videotag', // we don't default to ffmpeg because ffmpeg might choose a frame slightly off
   captureFrameQuality: 0.95,
   captureFrameFileNameFormat: 'timestamp',
@@ -143,20 +149,24 @@ const defaults: Config = {
   preferStrongColors: false,
   outputFileNameMinZeroPadding: 1,
   cutFromAdjustmentFrames: 0,
+  cutToAdjustmentFrames: 0,
   invertTimelineScroll: undefined,
+  storeWindowBounds: true,
 };
+
+const configFileName = 'config.json'; // note: this is also hard-coded inside electron-store
 
 // look for a config.json file next to the executable
 // For portable app: https://github.com/mifi/lossless-cut/issues/645
-async function lookForCustomStoragePath() {
+async function lookForNeighbourConfigFile() {
   try {
     // https://github.com/mifi/lossless-cut/issues/645#issuecomment-1001363314
     // https://stackoverflow.com/questions/46307797/how-to-get-the-original-path-of-a-portable-electron-app
     // https://github.com/electron-userland/electron-builder/blob/master/docs/configuration/nsis.md
     if (!isWindows || process.windowsStore) return undefined;
-    const customStorageDir = process.env['PORTABLE_EXECUTABLE_DIR'] || dirname(app.getPath('exe'));
-    const customConfigPath = join(customStorageDir, 'config.json');
-    if (await pathExists(customConfigPath)) return customStorageDir;
+    const appExeDir = process.env['PORTABLE_EXECUTABLE_DIR'] || dirname(app.getPath('exe'));
+    const customConfigPath = join(appExeDir, configFileName);
+    if (await pathExists(customConfigPath)) return appExeDir;
 
     return undefined;
   } catch (err) {
@@ -198,8 +208,12 @@ async function tryCreateStore({ customStoragePath }: { customStoragePath: string
   throw new Error('Timed out while creating config store');
 }
 
+let customStoragePath: string | undefined;
+
+export const getConfigPath = () => customStoragePath ?? join(app.getPath('userData'), configFileName); // custom path, or default used by electron-store
+
 export async function init({ customConfigDir }: { customConfigDir: string | undefined }) {
-  const customStoragePath = customConfigDir ?? await lookForCustomStoragePath();
+  customStoragePath = customConfigDir ?? await lookForNeighbourConfigFile();
   if (customStoragePath) logger.info('customStoragePath', customStoragePath);
 
   await tryCreateStore({ customStoragePath });
