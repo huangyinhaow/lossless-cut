@@ -14,12 +14,18 @@ import CopyClipboardButton from '../components/CopyClipboardButton';
 import Checkbox from '../components/Checkbox';
 import { isWindows, showItemInFolder } from '../util';
 import { ParseTimecode, SegmentBase } from '../types';
+import { FindKeyframeMode } from '../ffmpeg';
 
-const { dialog, shell } = window.require('@electron/remote');
+const remote = window.require('@electron/remote');
+const { dialog, shell } = remote;
+
+const { downloadMediaUrl } = remote.require('./index.js');
 
 
-export async function promptTimeOffset({ initialValue, title, text, inputPlaceholder, parseTimecode }: { initialValue?: string | undefined, title: string, text?: string | undefined, inputPlaceholder: string, parseTimecode: ParseTimecode }) {
-  const { value } = await Swal.fire({
+export async function promptTimecode({ initialValue, title, text, inputPlaceholder, parseTimecode, allowRelative = false }: {
+  initialValue?: string | undefined, title: string, text?: string | undefined, inputPlaceholder: string, parseTimecode: ParseTimecode, allowRelative?: boolean,
+}) {
+  const { value } = await Swal.fire<string>({
     title,
     text,
     input: 'text',
@@ -35,11 +41,22 @@ export async function promptTimeOffset({ initialValue, title, text, inputPlaceho
     return undefined;
   }
 
-  const duration = parseTimecode(value);
-  // Invalid, try again
-  if (duration === undefined) return promptTimeOffset({ initialValue: value, title, text, inputPlaceholder, parseTimecode });
+  let relDirection: number | undefined;
+  if (allowRelative) {
+    if (value.startsWith('-')) relDirection = -1;
+    else if (value.startsWith('+')) relDirection = 1;
+  }
 
-  return duration;
+  const value2 = allowRelative ? value.replace(/^[+-]/, '') : value;
+
+  const duration = parseTimecode(value2);
+  // Invalid, try again
+  if (duration === undefined) return promptTimecode({ initialValue: value, title, text, inputPlaceholder, parseTimecode, allowRelative });
+
+  return {
+    duration,
+    relDirection,
+  };
 }
 
 // https://github.com/mifi/lossless-cut/issues/1495
@@ -142,6 +159,20 @@ export async function showDiskFull() {
   await Swal.fire({
     icon: 'error',
     text: i18n.t('You ran out of space'),
+  });
+}
+
+export async function showMuxNotSupported() {
+  await Swal.fire({
+    icon: 'error',
+    text: i18n.t('At least one codec is not supported by the selected output file format. Try another output format or try to disable one or more tracks.'),
+  });
+}
+
+export async function showOutputNotWritable() {
+  await Swal.fire({
+    icon: 'error',
+    text: i18n.t('You are not allowed to write the output file. This probably means that the file already exists with the wrong permissions, or you don\'t have write permissions to the output folder.'),
   });
 }
 
@@ -261,8 +292,8 @@ async function askForSegmentsRandomDurationRange() {
   return parse(value);
 }
 
-async function askForSegmentsStartOrEnd(text) {
-  const { value } = await Swal.fire({
+async function askForSegmentsStartOrEnd(text: string) {
+  const { value } = await Swal.fire<string>({
     input: 'radio',
     showCancelButton: true,
     inputOptions: {
@@ -293,7 +324,7 @@ export async function askForShiftSegments({ inputPlaceholder, parseTimecode }: {
     return undefined;
   }
 
-  const { value } = await Swal.fire({
+  const { value } = await Swal.fire<string>({
     input: 'text',
     showCancelButton: true,
     inputValue: inputPlaceholder,
@@ -322,14 +353,14 @@ export async function askForAlignSegments() {
   const startOrEnd = await askForSegmentsStartOrEnd(i18n.t('Do you want to align the segment start or end timestamps to keyframes?'));
   if (startOrEnd == null) return undefined;
 
-  const { value: mode } = await Swal.fire({
+  const { value: mode } = await Swal.fire<FindKeyframeMode>({
     input: 'radio',
     showCancelButton: true,
     inputOptions: {
       nearest: i18n.t('Nearest keyframe'),
       before: i18n.t('Previous keyframe'),
       after: i18n.t('Next keyframe'),
-    },
+    } satisfies Record<FindKeyframeMode, unknown>,
     inputValue: 'before',
     text: i18n.t('Do you want to align segment times to the nearest, previous or next keyframe?'),
   });
@@ -363,13 +394,25 @@ export async function confirmExtractAllStreamsDialog() {
   return !!value;
 }
 
-const CleanupChoices = ({ cleanupChoicesInitial, onChange: onChangeProp }) => {
+export interface CleanupChoicesType {
+  trashTmpFiles: boolean,
+  closeFile: boolean,
+  askForCleanup: boolean,
+  cleanupAfterExport?: boolean | undefined,
+  trashSourceFile?: boolean,
+  trashProjectFile?: boolean,
+  deleteIfTrashFails?: boolean,
+}
+export type CleanupChoice = keyof CleanupChoicesType;
+
+
+const CleanupChoices = ({ cleanupChoicesInitial, onChange: onChangeProp }: { cleanupChoicesInitial: CleanupChoicesType, onChange: (v: CleanupChoicesType) => void }) => {
   const [choices, setChoices] = useState(cleanupChoicesInitial);
 
-  const getVal = (key) => !!choices[key];
+  const getVal = (key: CleanupChoice) => !!choices[key];
 
-  const onChange = (key, val) => setChoices((oldChoices) => {
-    const newChoices = { ...oldChoices, [key]: val };
+  const onChange = (key: CleanupChoice, val: boolean | string) => setChoices((oldChoices) => {
+    const newChoices = { ...oldChoices, [key]: Boolean(val) };
     if ((newChoices.trashSourceFile || newChoices.trashTmpFiles) && !newChoices.closeFile) {
       newChoices.closeFile = true;
     }
@@ -406,10 +449,10 @@ const CleanupChoices = ({ cleanupChoicesInitial, onChange: onChangeProp }) => {
   );
 };
 
-export async function showCleanupFilesDialog(cleanupChoicesIn) {
+export async function showCleanupFilesDialog(cleanupChoicesIn: CleanupChoicesType) {
   let cleanupChoices = cleanupChoicesIn;
 
-  const { value } = await ReactSwal.fire({
+  const { value } = await ReactSwal.fire<string>({
     title: i18n.t('Cleanup files?'),
     html: <CleanupChoices cleanupChoicesInitial={cleanupChoices} onChange={(newChoices) => { cleanupChoices = newChoices; }} />,
     confirmButtonText: i18n.t('Confirm'),
@@ -501,8 +544,8 @@ export async function showConcatFailedDialog({ fileFormat }: { fileFormat: strin
   return value;
 }
 
-export function openYouTubeChaptersDialog(text: string) {
-  ReactSwal.fire({
+export async function openYouTubeChaptersDialog(text: string) {
+  await ReactSwal.fire({
     showCloseButton: true,
     title: i18n.t('YouTube Chapters'),
     html: (
@@ -539,30 +582,29 @@ export async function selectSegmentsByLabelDialog(currentName: string) {
   return value;
 }
 
-export async function selectSegmentsByExprDialog(inputValidator: (v: string) => Promise<string | undefined>) {
-  const examples = {
-    duration: { name: i18n.t('Segment duration less than 5 seconds'), code: 'segment.duration < 5' },
-    start: { name: i18n.t('Segment starts after 00:60'), code: 'segment.start > 60' },
-    label: { name: i18n.t('Segment label (exact)'), code: "segment.label === 'My label'" },
-    regexp: { name: i18n.t('Segment label (regexp)'), code: '/^My label/.test(segment.label)' },
-    tag: { name: i18n.t('Segment tag value'), code: "segment.tags.myTag === 'tag value'" },
-  };
-
+export async function exprDialog({ inputValidator, examples, title, description, variables }: {
+  inputValidator: (v: string) => Promise<string | undefined>,
+  examples: Record<string, { name: string, code: string }>,
+  title: string,
+  description: ReactNode,
+  variables: string[]
+}) {
   function addExample(type: string) {
     Swal.getInput()!.value = examples[type]?.code ?? '';
   }
 
   const { value } = await ReactSwal.fire<string>({
     showCancelButton: true,
-    title: i18n.t('Select segments by expression'),
+    title,
     input: 'text',
+    width: '90vw',
     html: (
       <div style={{ textAlign: 'left' }}>
         <div style={{ marginBottom: '1em' }}>
-          <Trans>Enter a JavaScript expression which will be evaluated for each segment. Segments for which the expression evaluates to &quot;true&quot; will be selected. <button type="button" className="link-button" onClick={() => shell.openExternal('https://github.com/mifi/lossless-cut/blob/master/expressions.md')}>View available syntax.</button></Trans>
+          {description}
         </div>
 
-        <div style={{ marginBottom: '1em' }}><b>{i18n.t('Variables')}:</b> segment.label, segment.start, segment.end, segment.duration, segment.tags.*</div>
+        <div style={{ marginBottom: '1em' }}><b>{i18n.t('Variables')}:</b> {variables.join(', ')}</div>
 
         <div><b>{i18n.t('Examples')}:</b></div>
 
@@ -573,10 +615,43 @@ export async function selectSegmentsByExprDialog(inputValidator: (v: string) => 
         ))}
       </div>
     ),
-    inputPlaceholder: 'segment.duration < 5',
+    inputPlaceholder: i18n.t('Enter JavaScript expression'),
     inputValidator,
   });
   return value;
+}
+
+export async function selectSegmentsByExprDialog(inputValidator: (v: string) => Promise<string | undefined>) {
+  return exprDialog({
+    inputValidator,
+    examples: {
+      duration: { name: i18n.t('Segment duration less than 5 seconds'), code: 'segment.duration < 5' },
+      start: { name: i18n.t('Segment starts after 01:00'), code: 'segment.start > 60' },
+      label: { name: i18n.t('Segment label (exact)'), code: "segment.label === 'My label'" },
+      regexp: { name: i18n.t('Segment label (regexp)'), code: '/^My label/.test(segment.label)' },
+      tag: { name: i18n.t('Segment tag value'), code: "segment.tags.myTag === 'tag value'" },
+    },
+    title: i18n.t('Select segments by expression'),
+    description: <Trans>Enter a JavaScript expression which will be evaluated for each segment. Segments for which the expression evaluates to &quot;true&quot; will be selected. <button type="button" className="link-button" onClick={() => shell.openExternal('https://github.com/mifi/lossless-cut/blob/master/expressions.md')}>View available syntax.</button></Trans>,
+    variables: ['segment.index', 'segment.label', 'segment.start', 'segment.end', 'segment.duration', 'segment.tags.*'],
+  });
+}
+
+export async function mutateSegmentsByExprDialog(inputValidator: (v: string) => Promise<string | undefined>) {
+  return exprDialog({
+    inputValidator,
+    examples: {
+      center: { name: i18n.t('Feather segments +5 sec'), code: '{ start: segment.start - 5, end: segment.end + 5 }' },
+      feather: { name: i18n.t('Shrink segments -5 sec'), code: '{ start: segment.start + 5, end: segment.end - 5 }' },
+      shrink: { name: i18n.t('Center segments around start time'), code: '{ start: segment.start - 5, end: segment.start + 5 }' },
+      // eslint-disable-next-line no-template-curly-in-string
+      addNumToLabel: { name: i18n.t('Add number suffix to label'), code: '{ label: `${segment.label} ${segment.index + 1}` }' },
+      tagEven: { name: i18n.t('Add a tag to every even segment'), code: '{ tags: (segment.index + 1) % 2 === 0 ? { ...segment.tags, even: \'true\' } : segment.tags }' },
+    },
+    title: i18n.t('Edit segments by expression'),
+    description: <Trans>Enter a JavaScript expression which will be evaluated for each selected segment. Returned properties will be edited. <button type="button" className="link-button" onClick={() => shell.openExternal('https://github.com/mifi/lossless-cut/blob/master/expressions.md')}>View available syntax.</button></Trans>,
+    variables: ['segment.index', 'segment.label', 'segment.start', 'segment.end', 'segment.tags.*'],
+  });
 }
 
 export function showJson5Dialog({ title, json, darkMode }: { title: string, json: unknown, darkMode: boolean }) {
@@ -689,4 +764,19 @@ export async function askForPlaybackRate({ detectedFps, outputPlaybackRate }) {
   if (!value) return undefined;
 
   return parseValue(value);
+}
+
+export async function promptDownloadMediaUrl(outPath: string) {
+  const { value } = await Swal.fire<string>({
+    title: i18n.t('Open media from URL'),
+    input: 'text',
+    inputPlaceholder: 'https://example.com/video.m3u8',
+    text: i18n.t('Losslessly download a whole media file from the specified URL, mux it into an mkv file and open it in LosslessCut. This can be useful if you need to download a video from a website, e.g. a HLS streaming video. For example in Chrome you can open Developer Tools and view the network traffic, find the playlist (e.g. m3u8) and copy paste its URL here.'),
+    showCancelButton: true,
+  });
+
+  if (!value) return false;
+
+  await downloadMediaUrl(value, outPath);
+  return true;
 }

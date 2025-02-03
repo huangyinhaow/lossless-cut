@@ -1,18 +1,17 @@
 import { XMLParser } from 'fast-xml-parser';
 import i18n from 'i18next';
+import invariant from 'tiny-invariant';
+import { Duration } from 'luxon';
 
-import csvParse from 'csv-parse/lib/browser';
-import csvStringify from 'csv-stringify/lib/browser';
-import pify from 'pify';
+import { parse as csvParse } from 'csv-parse/browser/esm/sync';
+import { stringify as csvStringify } from 'csv-stringify/browser/esm/sync';
 import sortBy from 'lodash/sortBy';
 import type { ICueSheet, ITrack } from 'cue-parser/lib/types';
 
 import { formatDuration } from './util/duration';
 import { invertSegments, sortSegments } from './segments';
-import { Segment, SegmentBase } from './types';
-
-const csvParseAsync = pify(csvParse);
-const csvStringifyAsync = pify(csvStringify);
+import { GetFrameCount, Segment, SegmentBase } from './types';
+import parseCmx3600 from './cmx3600';
 
 export const getTimeFromFrameNum = (detectedFps: number, frameNum: number) => frameNum / detectedFps;
 
@@ -48,7 +47,7 @@ export const getFrameValParser = (fps: number) => (str: string) => {
 };
 
 export async function parseCsv(csvStr: string, parseTimeFn: (a: string) => number | undefined) {
-  const rows = await csvParseAsync(csvStr, {}) as [string, string, string][];
+  const rows = csvParse(csvStr, {}) as [string, string, string][];
   if (rows.length === 0) throw new Error(i18n.t('No rows found'));
   if (!rows.every((row) => row.length === 3)) throw new Error(i18n.t('One or more rows does not have 3 columns'));
 
@@ -77,61 +76,56 @@ export async function parseCutlist(clStr: string) {
     param: /^\s*([^=]+?)\s*=\s*(.*?)\s*$/,
     comment: /^\s*;.*$/,
   };
-  const iniValue = {};
+  const iniValue: Record<string, string | undefined | Record<string, string | undefined>> = {};
+
   const lines = clStr.split(/[\n\r]+/);
-  let section: string | null | undefined = null;
+  let section: string | undefined;
   lines.forEach((line) => {
     if (regex.comment.test(line)) {
       return;
-    } if (regex.param.test(line)) {
+    }
+    if (regex.param.test(line)) {
       const match = line.match(regex.param) || [];
-      const [, m1, m2] = match;
-      if (m1) {
+      const [, key, value] = match;
+      if (key) {
         if (section) {
-          iniValue[section][m1] = m2;
+          const sectionObj = iniValue[section];
+          invariant(sectionObj != null && typeof sectionObj !== 'string');
+          sectionObj[key] = value;
         } else {
-          iniValue[m1] = m2;
+          iniValue[key] = value;
         }
       }
     } else if (regex.section.test(line)) {
       const match = line.match(regex.section) || [];
-      const [, m1] = match;
-      if (m1) {
-        iniValue[m1] = {};
-        section = m1;
+      const [, sectionMatch] = match;
+      if (sectionMatch) {
+        iniValue[sectionMatch] = {};
+        section = sectionMatch;
       }
     } else if (line.length === 0 && section) {
-      section = null;
+      section = undefined;
     }
   });
 
   // end INI-File parse
 
-  let found = true;
-  let i = 0;
   const cutArr: { start: number, end: number, name: string }[] = [];
-  while (found) {
+  for (let i = 0; ; i += 1) {
     const cutEntry = iniValue[`Cut${i}`];
-    if (cutEntry) {
-      const start = parseFloat(cutEntry.Start);
-      const end = Math.round((start + parseFloat(cutEntry.Duration) + Number.EPSILON) * 100) / 100;
+    if (cutEntry && typeof cutEntry !== 'string') {
+      const start = parseFloat(cutEntry['Start']!);
+      const end = Math.round((start + parseFloat(cutEntry['Duration']!) + Number.EPSILON) * 100) / 100;
+      invariant(!Number.isNaN(start), 'Invalid Start');
+      invariant(!Number.isNaN(end), 'Invalid End');
       cutArr.push({
         start,
         end,
         name: `Cut ${i}`,
       });
     } else {
-      found = false;
+      break;
     }
-    i += 1;
-  }
-
-  if (!cutArr.every(({ start, end }) => (
-    (start === undefined || !Number.isNaN(start))
-    && (end === undefined || !Number.isNaN(end))
-  ))) {
-    console.log(cutArr);
-    throw new Error(i18n.t('Invalid start or end value. Must contain a number of seconds'));
   }
 
   return cutArr;
@@ -166,6 +160,33 @@ export async function parseMplayerEdl(text: string) {
   ];
   if (out.length === 0) throw new Error(i18n.t('Invalid EDL data found'));
   return out;
+}
+
+export async function parseEdlCmx3600(text: string, fps: number) {
+  const cmx = parseCmx3600(text);
+
+  const parseTimecode = (t: string) => {
+    const match = t.match(/^(\d+)[:;](\d+)[:;](\d+)[:;](\d+)$/);
+    invariant(match, `Invalid EDL line: ${t}`);
+    const hours = parseInt(match[1]!, 10);
+    const minutes = parseInt(match[2]!, 10);
+    const seconds = parseInt(match[3]!, 10);
+    const frames = parseInt(match[4]!, 10);
+    return Duration.fromObject({ hours, minutes, seconds: seconds + (frames / fps) }).as('seconds');
+  };
+
+  return cmx.events.map((event) => ({
+    start: parseTimecode(event.sourceIn),
+    end: parseTimecode(event.sourceOut),
+    name: event.eventNumber,
+    tags: { reel: event.reelNumber, trackType: event.trackType, transition: event.transition },
+  }));
+}
+
+export async function parseEdl(text: string, fps: number) {
+  // trim because it might have a BOM
+  if (text.trim().startsWith('TITLE: ')) return parseEdlCmx3600(text, fps);
+  return parseMplayerEdl(text);
 }
 
 export function parseCuesheet(cuesheet: ICueSheet) {
@@ -295,7 +316,7 @@ export function parseYouTube(str: string) {
   return edl.filter((ed) => ed.start !== ed.end);
 }
 
-export function formatYouTube(segments) {
+export function formatYouTube(segments: Segment[]) {
   return segments.map((segment) => {
     const timeStr = formatDuration({ seconds: segment.start, showFraction: false, shorten: true });
     const namePart = segment.name ? ` ${segment.name}` : '';
@@ -304,16 +325,16 @@ export function formatYouTube(segments) {
 }
 
 // because null/undefined is also valid values (start/end of timeline)
-const safeFormatDuration = (duration) => (duration != null ? formatDuration({ seconds: duration }) : '');
+const safeFormatDuration = (duration: number | undefined) => (duration != null ? formatDuration({ seconds: duration }) : '');
 
-export const formatSegmentsTimes = (cutSegments) => cutSegments.map(({ start, end, name }) => [
+export const formatSegmentsTimes = (cutSegments: Segment[]) => cutSegments.map(({ start, end, name }) => [
   safeFormatDuration(start),
   safeFormatDuration(end),
   name,
 ]);
 
-export async function formatCsvFrames({ cutSegments, getFrameCount }) {
-  const safeFormatFrameCount = (seconds) => (seconds != null ? getFrameCount(seconds) : '');
+export async function formatCsvFrames({ cutSegments, getFrameCount }: { cutSegments: Segment[], getFrameCount: GetFrameCount }) {
+  const safeFormatFrameCount = (seconds: number | undefined) => (seconds != null ? getFrameCount(seconds) : '');
 
   const formatted = cutSegments.map(({ start, end, name }) => [
     safeFormatFrameCount(start),
@@ -321,20 +342,20 @@ export async function formatCsvFrames({ cutSegments, getFrameCount }) {
     name,
   ]);
 
-  return csvStringifyAsync(formatted);
+  return csvStringify(formatted);
 }
 
-export async function formatCsvSeconds(cutSegments) {
+export async function formatCsvSeconds(cutSegments: Segment[]) {
   const rows = cutSegments.map(({ start, end, name }) => [start, end, name]);
-  return csvStringifyAsync(rows);
+  return csvStringify(rows);
 }
 
-export async function formatCsvHuman(cutSegments) {
-  return csvStringifyAsync(formatSegmentsTimes(cutSegments));
+export async function formatCsvHuman(cutSegments: Segment[]) {
+  return csvStringify(formatSegmentsTimes(cutSegments));
 }
 
-export async function formatTsv(cutSegments) {
-  return csvStringifyAsync(formatSegmentsTimes(cutSegments), { delimiter: '\t' });
+export async function formatTsv(cutSegments: Segment[]) {
+  return csvStringify(formatSegmentsTimes(cutSegments), { delimiter: '\t' });
 }
 
 export function parseDvAnalyzerSummaryTxt(txt: string) {
@@ -370,7 +391,7 @@ export function parseDvAnalyzerSummaryTxt(txt: string) {
 
 // http://www.textfiles.com/uploads/kds-srt.txt
 export function parseSrt(text: string) {
-  const ret: { start?: number, end?: number, name: string, tags: Record<string, string | undefined> }[] = [];
+  const ret: { start: number, end: number, lines: string[], index: number | undefined }[] = [];
 
   // working state
   let subtitleIndexAt: number | undefined;
@@ -380,7 +401,7 @@ export function parseSrt(text: string) {
 
   const flush = () => {
     if (start != null && end != null && lines.length > 0) {
-      ret.push({ start, end, name: lines.join('\r\n'), tags: { index: subtitleIndexAt != null ? String(subtitleIndexAt) : undefined } });
+      ret.push({ start, end, lines, index: subtitleIndexAt });
     }
     start = undefined;
     end = undefined;
@@ -396,7 +417,7 @@ export function parseSrt(text: string) {
     } else if (subtitleIndexAt != null && subtitleIndexAt > 0) {
       const match = line.match(/^(\d+:\d+:\d+[,.]\d+\s+)-->(\s+\d+:\d+:\d+[,.]\d+)$/);
       if (match) {
-        const fixComma = (v) => v.replaceAll(',', '.');
+        const fixComma = (v: string | undefined) => v!.replaceAll(',', '.');
         start = parseTime(fixComma(match[1]))?.time;
         end = parseTime(fixComma(match[2]))?.time;
       } else if (start != null && end != null) {
@@ -415,6 +436,34 @@ export function parseSrt(text: string) {
   return ret;
 }
 
-export function formatSrt(segments) {
+export function parseSrtToSegments(text: string) {
+  return parseSrt(text).map(({ start, end, lines, index }) => ({
+    start,
+    end,
+    name: lines.join('\r\n'),
+    tags: { index: index != null ? String(index) : undefined },
+  }));
+}
+
+export function formatSrt(segments: Segment[]) {
   return segments.reduce((acc, segment, index) => `${acc}${index > 0 ? '\r\n' : ''}${index + 1}\r\n${formatDuration({ seconds: segment.start }).replaceAll('.', ',')} --> ${formatDuration({ seconds: segment.end }).replaceAll('.', ',')}\r\n${segment.name || '-'}\r\n`, '');
+}
+
+export function parseGpsLine(line: string) {
+  const gpsMatch = line.match(/^\s*([^,]+),\s*SS\s+([^,]+),\s*ISO\s+([^,]+),\s*EV\s+([^,]+)(?:,\s*DZOOM\s+([^,]+))?,\s*GPS\s+\(([^,]+),\s*([^,]+),\s*([^,]+)\),\s*D\s+([^m]+)m,\s*H\s+([^m]+)m,\s*H\.S\s+([^m]+)m\/s,\s*V\.S\s+([^m]+)m\/s\s*$/);
+  if (!gpsMatch) return undefined;
+  return {
+    f: gpsMatch[1]!,
+    ss: parseFloat(gpsMatch[2]!),
+    iso: parseInt(gpsMatch[3]!, 10),
+    ev: parseFloat(gpsMatch[4]!),
+    dzoom: gpsMatch[5] != null ? parseFloat(gpsMatch[5]) : undefined,
+    lat: parseFloat(gpsMatch[6]!),
+    lng: parseFloat(gpsMatch[7]!),
+    alt: parseFloat(gpsMatch[8]!),
+    distance: parseFloat(gpsMatch[9]!),
+    height: parseFloat(gpsMatch[10]!),
+    horizontalSpeed: parseFloat(gpsMatch[11]!),
+    verticalSpeed: parseFloat(gpsMatch[12]!),
+  };
 }

@@ -1,16 +1,8 @@
-import fs from 'node:fs/promises';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { it, describe, expect } from 'vitest';
+import { it, describe, expect, test } from 'vitest';
 
+import { parseSrtToSegments, formatSrt, parseYouTube, formatYouTube, parseMplayerEdl, parseXmeml, parseFcpXml, parseCsv, parseCsvTime, getFrameValParser, formatCsvFrames, getFrameCountRaw, parsePbf, parseDvAnalyzerSummaryTxt, parseCutlist, parseGpsLine } from './edlFormats';
+import { readFixture, readFixtureBinary } from './test/util';
 
-import { parseSrt, formatSrt, parseYouTube, formatYouTube, parseMplayerEdl, parseXmeml, parseFcpXml, parseCsv, parseCsvTime, getFrameValParser, formatCsvFrames, getFrameCountRaw, parsePbf, parseDvAnalyzerSummaryTxt, parseCutlist } from './edlFormats';
-
-// eslint-disable-next-line no-underscore-dangle
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-const readFixture = async (name: string, encoding: BufferEncoding = 'utf8') => fs.readFile(join(__dirname, 'fixtures', name), encoding);
-const readFixtureBinary = async (name: string) => fs.readFile(join(__dirname, 'fixtures', name), null);
 
 const expectYouTube1 = [
   { start: 0, end: 1, name: '00:01 Test 1' },
@@ -177,16 +169,16 @@ it('parseMplayerEdl, starting at 0', async () => {
 });
 
 it('parses xmeml 1', async () => {
-  expect(await parseXmeml(await readFixture('Final Cut Pro XMEML.xml'))).toMatchSnapshot();
+  expect(parseXmeml(await readFixture('Final Cut Pro XMEML.xml'))).toMatchSnapshot();
 });
 
 it('parses xmeml 2', async () => {
-  expect(await parseXmeml(await readFixture('Final Cut Pro XMEML 2.xml'))).toMatchSnapshot();
+  expect(parseXmeml(await readFixture('Final Cut Pro XMEML 2.xml'))).toMatchSnapshot();
 });
 
 // see https://github.com/mifi/lossless-cut/issues/1195
 it('parses xmeml - with multiple tracks', async () => {
-  expect(await parseXmeml(await readFixture('Final Cut Pro XMEML 3.xml'))).toMatchSnapshot();
+  expect(parseXmeml(await readFixture('Final Cut Pro XMEML 3.xml'))).toMatchSnapshot();
 });
 
 // see https://github.com/mifi/lossless-cut/issues/1195
@@ -306,14 +298,20 @@ it('parses pbf', async () => {
 });
 
 it('parses srt', async () => {
-  expect(parseSrt(await readFixture('sample.srt'))).toMatchSnapshot();
+  expect(parseSrtToSegments(await readFixture('sample.srt'))).toMatchSnapshot();
 });
 
 it('format srt', async () => {
-  expect(formatSrt(parseSrt(await readFixture('sample.srt')))).toMatchSnapshot();
+  expect(formatSrt(parseSrtToSegments(await readFixture('sample.srt')))).toMatchSnapshot();
 });
 
 // https://github.com/mifi/lossless-cut/issues/1664
 it('parses DV Analyzer Summary.txt', async () => {
   expect(parseDvAnalyzerSummaryTxt(await readFixture('DV Analyzer Summary.txt', 'utf8'))).toMatchSnapshot();
+});
+
+test('parseGpsLine', () => {
+  expect(parseGpsLine('F/2.8, SS 776.89, ISO 100, EV -1.0, GPS (15.0732, 67.9771, 19), D 67.78m, H 20.30m, H.S 1.03m/s, V.S 0.00m/s')).toMatchSnapshot();
+  // https://github.com/mifi/lossless-cut/issues/2072#issuecomment-2325755148
+  expect(parseGpsLine('F/2.8, SS 678.52, ISO 100, EV 0, DZOOM 1.000, GPS (-3.9130, 56.5019, 26), D 0.57m, H 102.40m, H.S 0.00m/s, V.S -0.00m/s')).toMatchSnapshot();
 });

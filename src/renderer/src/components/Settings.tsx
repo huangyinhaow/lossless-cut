@@ -1,4 +1,4 @@
-import { CSSProperties, ChangeEventHandler, memo, useCallback, useMemo, useState } from 'react';
+import { CSSProperties, ChangeEventHandler, TdHTMLAttributes, memo, useCallback, useMemo, useState } from 'react';
 import { FaYinYang, FaKeyboard } from 'react-icons/fa';
 import { GlobeIcon, CleanIcon, CogIcon, Button, NumericalIcon, FolderCloseIcon, DocumentIcon, TimeIcon, CrossIcon } from 'evergreen-ui';
 import { useTranslation } from 'react-i18next';
@@ -11,7 +11,7 @@ import Switch from './Switch';
 import useUserSettings from '../hooks/useUserSettings';
 import { askForFfPath } from '../dialogs';
 import { isMasBuild, isStoreBuild } from '../util';
-import { LanguageKey, TimecodeFormat, langNames } from '../../../../types';
+import { LanguageKey, ModifierKey, TimecodeFormat, langNames } from '../../../../types';
 import styles from './Settings.module.css';
 import Select from './Select';
 
@@ -30,7 +30,7 @@ const Row = (props: HTMLMotionProps<'tr'>) => (
   />
 );
 // eslint-disable-next-line react/jsx-props-no-spreading
-const KeyCell = (props) => <td {...props} />;
+const KeyCell = (props: TdHTMLAttributes<HTMLTableCellElement>) => <td {...props} />;
 
 const Header = ({ title }: { title: string }) => (
   <Row className={styles['header']}>
@@ -39,6 +39,20 @@ const Header = ({ title }: { title: string }) => (
   </Row>
 );
 
+function ModifierKeySetting({ text, value, setValue }: { text: string, value: ModifierKey, setValue: (v: ModifierKey) => void }) {
+  return (
+    <Row>
+      <KeyCell>{text}</KeyCell>
+      <td>
+        <Select value={value} onChange={(e) => setValue(e.target.value as ModifierKey)}>
+          {Object.entries(getModifierKeyNames()).map(([key, values]) => (
+            <option key={key} value={key}>{values.join(' / ')}</option>
+          ))}
+        </Select>
+      </td>
+    </Row>
+  );
+}
 const detailsStyle: CSSProperties = { opacity: 0.75, fontSize: '.9em', marginTop: '.3em' };
 
 function Settings({
@@ -51,7 +65,7 @@ function Settings({
 }: {
   onTunerRequested: (type: TunerType) => void,
   onKeyboardShortcutsDialogRequested: () => void,
-  askForCleanupChoices: () => Promise<void>,
+  askForCleanupChoices: () => Promise<unknown>,
   toggleStoreProjectInWorkingDir: () => Promise<void>,
   simpleMode: boolean,
   clearOutDir: () => Promise<void>,
@@ -59,7 +73,7 @@ function Settings({
   const { t } = useTranslation();
   const [showAdvanced, setShowAdvanced] = useState(!simpleMode);
 
-  const { customOutDir, changeOutDir, keyframeCut, toggleKeyframeCut, timecodeFormat, setTimecodeFormat, invertCutSegments, setInvertCutSegments, askBeforeClose, setAskBeforeClose, enableAskForImportChapters, setEnableAskForImportChapters, enableAskForFileOpenAction, setEnableAskForFileOpenAction, autoSaveProjectFile, setAutoSaveProjectFile, invertTimelineScroll, setInvertTimelineScroll, language, setLanguage, hideNotifications, setHideNotifications, autoLoadTimecode, setAutoLoadTimecode, enableAutoHtml5ify, setEnableAutoHtml5ify, customFfPath, setCustomFfPath, storeProjectInWorkingDir, mouseWheelZoomModifierKey, setMouseWheelZoomModifierKey, captureFrameMethod, setCaptureFrameMethod, captureFrameQuality, setCaptureFrameQuality, captureFrameFileNameFormat, setCaptureFrameFileNameFormat, enableNativeHevc, setEnableNativeHevc, enableUpdateCheck, setEnableUpdateCheck, allowMultipleInstances, setAllowMultipleInstances, preferStrongColors, setPreferStrongColors, treatInputFileModifiedTimeAsStart, setTreatInputFileModifiedTimeAsStart, treatOutputFileModifiedTimeAsStart, setTreatOutputFileModifiedTimeAsStart, exportConfirmEnabled, toggleExportConfirmEnabled } = useUserSettings();
+  const { customOutDir, changeOutDir, keyframeCut, toggleKeyframeCut, timecodeFormat, setTimecodeFormat, invertCutSegments, setInvertCutSegments, askBeforeClose, setAskBeforeClose, enableAskForImportChapters, setEnableAskForImportChapters, enableAskForFileOpenAction, setEnableAskForFileOpenAction, autoSaveProjectFile, setAutoSaveProjectFile, invertTimelineScroll, setInvertTimelineScroll, language, setLanguage, hideNotifications, setHideNotifications, hideOsNotifications, setHideOsNotifications, autoLoadTimecode, setAutoLoadTimecode, enableAutoHtml5ify, setEnableAutoHtml5ify, customFfPath, setCustomFfPath, storeProjectInWorkingDir, mouseWheelZoomModifierKey, setMouseWheelZoomModifierKey, mouseWheelFrameSeekModifierKey, setMouseWheelFrameSeekModifierKey, mouseWheelKeyframeSeekModifierKey, setMouseWheelKeyframeSeekModifierKey, captureFrameMethod, setCaptureFrameMethod, captureFrameQuality, setCaptureFrameQuality, captureFrameFileNameFormat, setCaptureFrameFileNameFormat, enableNativeHevc, setEnableNativeHevc, enableUpdateCheck, setEnableUpdateCheck, allowMultipleInstances, setAllowMultipleInstances, preferStrongColors, setPreferStrongColors, treatInputFileModifiedTimeAsStart, setTreatInputFileModifiedTimeAsStart, treatOutputFileModifiedTimeAsStart, setTreatOutputFileModifiedTimeAsStart, exportConfirmEnabled, toggleExportConfirmEnabled, storeWindowBounds, setStoreWindowBounds } = useUserSettings();
 
   const onLangChange = useCallback<ChangeEventHandler<HTMLSelectElement>>((e) => {
     const { value } = e.target;
@@ -104,19 +118,36 @@ function Settings({
 
         <tbody>
           <Row>
-            <KeyCell>{t('Show advanced settings')}</KeyCell>
-            <td>
-              <Switch checked={showAdvanced} onCheckedChange={setShowAdvanced} />
-            </td>
-          </Row>
-
-          <Row>
             <KeyCell><GlobeIcon style={{ verticalAlign: 'middle', marginRight: '.5em' }} /> App language</KeyCell>
             <td>
               <Select value={language || ''} onChange={onLangChange} style={{ fontSize: '1.2em' }}>
                 <option key="" value="">{t('System language')}</option>
                 {Object.keys(langNames).map((lang) => <option key={lang} value={lang}>{langNames[lang]}</option>)}
               </Select>
+            </td>
+          </Row>
+
+          <Row>
+            <KeyCell>
+              {t('Show advanced settings')}
+              <div style={detailsStyle}>
+                {!showAdvanced && t('Advanced settings are currently not visible.')}
+              </div>
+            </KeyCell>
+            <td>
+              <Switch checked={showAdvanced} onCheckedChange={setShowAdvanced} />
+            </td>
+          </Row>
+
+          <Row>
+            <KeyCell>
+              {t('Show export options screen before exporting?')}
+              <div style={detailsStyle}>
+                {t('This gives you an overview of the export and allows you to customise more parameters before exporting, like changing the output file name.')}
+              </div>
+            </KeyCell>
+            <td>
+              <Switch checked={exportConfirmEnabled} onCheckedChange={toggleExportConfirmEnabled} />
             </td>
           </Row>
 
@@ -184,12 +215,15 @@ function Settings({
             <KeyCell>
               {t('Choose cutting mode: Remove or keep selected segments from video when exporting?')}<br />
               <div style={detailsStyle}>
-                <b>{t('Keep')}</b>: {t('The video inside segments will be kept, while the video outside will be discarded.')}<br />
-                <b>{t('Remove')}</b>: {t('The video inside segments will be discarded, while the video surrounding them will be kept.')}
+                {invertCutSegments ? (
+                  <><b>{t('Remove')}</b>: {t('The video inside segments will be discarded, while the video surrounding them will be kept.')}</>
+                ) : (
+                  <><b>{t('Keep')}</b>: {t('The video inside segments will be kept, while the video outside will be discarded.')}</>
+                )}
               </div>
             </KeyCell>
             <td>
-              <Button iconBefore={FaYinYang} appearance={invertCutSegments ? 'default' : 'primary'} intent="success" onClick={() => setInvertCutSegments((v) => !v)}>
+              <Button iconBefore={FaYinYang} appearance="primary" intent={invertCutSegments ? 'danger' : 'success'} onClick={() => setInvertCutSegments((v) => !v)}>
                 {invertCutSegments ? t('Remove') : t('Keep')}
               </Button>
             </td>
@@ -203,10 +237,10 @@ function Settings({
               </div>
             </KeyCell>
             <td>
+              <div>{customOutDir}</div>
               <Button iconBefore={customOutDir ? FolderCloseIcon : DocumentIcon} onClick={changeOutDir}>
                 {customOutDir ? t('Custom working directory') : t('Same directory as input file')}...
               </Button>
-              <div>{customOutDir}</div>
               {customOutDir && (
                 <Button
                   height={20}
@@ -223,7 +257,7 @@ function Settings({
             <Row>
               <KeyCell>{t('Set file modification date/time of output files to:')}</KeyCell>
               <td>
-                <Select value={treatOutputFileModifiedTimeAsStart ? String(treatOutputFileModifiedTimeAsStart) : 'disabled'} onChange={(e) => setTreatOutputFileModifiedTimeAsStart(e.target.value === 'disabled' ? null : (e.target.value === 'true'))}>
+                <Select value={typeof treatOutputFileModifiedTimeAsStart === 'boolean' ? String(treatOutputFileModifiedTimeAsStart) : 'disabled'} onChange={(e) => setTreatOutputFileModifiedTimeAsStart(e.target.value === 'disabled' ? null : (e.target.value === 'true'))}>
                   <option value="disabled">{t('Current time')}</option>
                   <option value="true">{t('Source file\'s time plus segment start cut time')}</option>
                   <option value="false">{t('Source file\'s time minus segment end cut time')}</option>
@@ -250,13 +284,13 @@ function Settings({
               <div style={detailsStyle}>
                 {keyframeCut ? (
                   <>
-                    {t('Cut at the nearest keyframe (not accurate time.) Equiv to')}:<br />
-                    <code className="highlighted">ffmpeg -ss -i ...</code>
+                    <b>{t('Keyframe cut')}</b>: {t('Cut at the preceding keyframe (not accurate time.) Equiv to')}:<br />
+                    <code className="highlighted">ffmpeg -ss -i input.mp4</code>
                   </>
                 ) : (
                   <>
-                    {t('Accurate time but could leave an empty portion at the beginning of the video. Equiv to')}:<br />
-                    <code className="highlighted">ffmpeg -i -ss ...</code>
+                    <b>{t('Normal cut')}</b>: {t('Accurate time but could leave an empty portion at the beginning of the video. Equiv to')}:<br />
+                    <code className="highlighted">ffmpeg -i -ss input.mp4</code>
                   </>
                 )}
               </div>
@@ -299,17 +333,19 @@ function Settings({
             </td>
           </Row>
 
-          <Row>
-            <KeyCell>
-              {t('Snapshot capture method')}
-              <div style={detailsStyle}>{t('FFmpeg capture method might sometimes capture more correct colors, but the captured snapshot might be off by one or more frames, relative to the preview.')}</div>
-            </KeyCell>
-            <td>
-              <Button onClick={() => setCaptureFrameMethod((existing) => (existing === 'ffmpeg' ? 'videotag' : 'ffmpeg'))}>
-                {captureFrameMethod === 'ffmpeg' ? t('FFmpeg') : t('HTML video tag')}
-              </Button>
-            </td>
-          </Row>
+          {showAdvanced && (
+            <Row>
+              <KeyCell>
+                {t('Snapshot capture method')}
+                <div style={detailsStyle}>{t('FFmpeg capture method might sometimes capture more correct colors, but the captured snapshot might be off by one or more frames, relative to the preview.')}</div>
+              </KeyCell>
+              <td>
+                <Button onClick={() => setCaptureFrameMethod((existing) => (existing === 'ffmpeg' ? 'videotag' : 'ffmpeg'))}>
+                  {captureFrameMethod === 'ffmpeg' ? t('FFmpeg') : t('HTML video tag')}
+                </Button>
+              </td>
+            </Row>
+          )}
 
           <Row>
             <KeyCell>{t('Snapshot capture quality')}</KeyCell>
@@ -319,14 +355,16 @@ function Settings({
             </td>
           </Row>
 
-          <Row>
-            <KeyCell>{t('File names of extracted video frames')}</KeyCell>
-            <td>
-              <Button iconBefore={captureFrameFileNameFormat === 'timestamp' ? TimeIcon : NumericalIcon} onClick={() => setCaptureFrameFileNameFormat((existing) => (existing === 'timestamp' ? 'index' : 'timestamp'))}>
-                {captureFrameFileNameFormat === 'timestamp' ? t('Frame timestamp') : t('Frame number')}
-              </Button>
-            </td>
-          </Row>
+          {showAdvanced && (
+            <Row>
+              <KeyCell>{t('File names of extracted video frames')}</KeyCell>
+              <td>
+                <Button iconBefore={captureFrameFileNameFormat === 'timestamp' ? TimeIcon : NumericalIcon} onClick={() => setCaptureFrameFileNameFormat((existing) => (existing === 'timestamp' ? 'index' : 'timestamp'))}>
+                  {captureFrameFileNameFormat === 'timestamp' ? t('Frame timestamp') : t('Frame number')}
+                </Button>
+              </td>
+            </Row>
+          )}
 
 
           <Header title={t('Keyboard, mouse and input')} />
@@ -338,16 +376,9 @@ function Settings({
             </td>
           </Row>
 
-          <Row>
-            <KeyCell>{t('Mouse wheel zoom modifier key')}</KeyCell>
-            <td>
-              <Select value={mouseWheelZoomModifierKey} onChange={(e) => setMouseWheelZoomModifierKey(e.target.value)}>
-                {Object.entries(getModifierKeyNames()).map(([key, values]) => (
-                  <option key={key} value={key}>{values.join(' / ')}</option>
-                ))}
-              </Select>
-            </td>
-          </Row>
+          <ModifierKeySetting text={t('Mouse wheel zoom modifier key')} value={mouseWheelZoomModifierKey} setValue={setMouseWheelZoomModifierKey} />
+          <ModifierKeySetting text={t('Mouse wheel frame seek modifier key')} value={mouseWheelFrameSeekModifierKey} setValue={setMouseWheelFrameSeekModifierKey} />
+          <ModifierKeySetting text={t('Mouse wheel keyframe seek modifier key')} value={mouseWheelKeyframeSeekModifierKey} setValue={setMouseWheelKeyframeSeekModifierKey} />
 
           <Row>
             <KeyCell>{t('Timeline trackpad/wheel sensitivity')}</KeyCell>
@@ -391,7 +422,17 @@ function Settings({
             </td>
           </Row>
 
+
           <Header title={t('User interface')} />
+
+          {showAdvanced && (
+            <Row>
+              <KeyCell>{t('Remember window size and position')}</KeyCell>
+              <td>
+                <Switch checked={storeWindowBounds} onCheckedChange={setStoreWindowBounds} />
+              </td>
+            </Row>
+          )}
 
           {showAdvanced && (
             <Row>
@@ -422,6 +463,13 @@ function Settings({
           )}
 
           <Row>
+            <KeyCell>{t('Prefer strong colors')}</KeyCell>
+            <td>
+              <Switch checked={preferStrongColors} onCheckedChange={setPreferStrongColors} />
+            </td>
+          </Row>
+
+          <Row>
             <KeyCell>{t('In timecode show')}</KeyCell>
             <td>
               <Button iconBefore={timecodeFormat === 'frameCount' ? NumericalIcon : TimeIcon} onClick={onTimecodeFormatClick}>
@@ -430,24 +478,18 @@ function Settings({
             </td>
           </Row>
 
-          <Row>
-            <KeyCell>{t('Prefer strong colors')}</KeyCell>
-            <td>
-              <Switch checked={preferStrongColors} onCheckedChange={setPreferStrongColors} />
-            </td>
-          </Row>
 
           <Header title={t('Prompts and dialogs')} />
 
           <Row>
-            <KeyCell>{t('Show export options screen before exporting?')}</KeyCell>
+            <KeyCell>{t('Show notifications')}</KeyCell>
             <td>
-              <Switch checked={exportConfirmEnabled} onCheckedChange={toggleExportConfirmEnabled} />
+              <Switch checked={!hideOsNotifications} onCheckedChange={(v) => setHideOsNotifications(v ? undefined : 'all')} />
             </td>
           </Row>
 
           <Row>
-            <KeyCell>{t('Show informational notifications')}</KeyCell>
+            <KeyCell>{t('Show informational in-app notifications')}</KeyCell>
             <td>
               <Switch checked={!hideNotifications} onCheckedChange={(v) => setHideNotifications(v ? undefined : 'all')} />
             </td>

@@ -230,7 +230,7 @@ async function startPlayback({ path, video, videoStreamIndex, audioStreamIndex, 
   processChunk();
 }
 
-function drawJpegFrame(canvas: HTMLCanvasElement | null, jpegImage: Buffer) {
+function drawJpegFrame(canvas: HTMLCanvasElement | null, jpegImage: Uint8Array) {
   if (!canvas) return;
 
   const ctx = canvas.getContext('2d');
@@ -244,7 +244,8 @@ function drawJpegFrame(canvas: HTMLCanvasElement | null, jpegImage: Buffer) {
   img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   // eslint-disable-next-line unicorn/prefer-add-event-listener
   img.onerror = (error) => console.error('Canvas JPEG image error', error);
-  img.src = `data:image/jpeg;base64,${jpegImage.toString('base64')}`;
+  // todo use Blob?
+  img.src = `data:image/jpeg;base64,${Buffer.from(jpegImage).toString('base64')}`;
 }
 
 async function createPauseImage({ path, seekTo, videoStreamIndex, canvas, signal }: {
@@ -296,7 +297,15 @@ function MediaSourcePlayer({ rotate, filePath, playerTime, videoStream, audioStr
       return () => undefined;
     }
 
-    const onCanPlay = () => setLoading(false);
+    const clearCanvas = () => {
+      if (canvasRef.current == null) return;
+      canvasRef.current.getContext('2d')?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    };
+
+    const onCanPlay = () => {
+      clearCanvas();
+      setLoading(false);
+    };
     const getTargetTime = () => masterVideoRef.current!.currentTime - debouncedState.startTime;
 
     const abortController = new AbortController();
@@ -347,9 +356,11 @@ function MediaSourcePlayer({ rotate, filePath, playerTime, videoStream, audioStr
   const { videoStyle, canvasStyle } = useMemo(() => {
     const sharedStyle: CSSProperties = { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, display: 'block', width: '100%', height: '100%', objectFit: 'contain', transform: rotate ? `rotate(${rotate}deg)` : undefined };
 
+    const shouldShowCanvas = !debouncedState.playing;
+
     return {
       videoStyle: { ...sharedStyle, visibility: loading || !debouncedState.playing ? 'hidden' : undefined },
-      canvasStyle: { ...sharedStyle, visibility: loading || debouncedState.playing ? 'hidden' : undefined },
+      canvasStyle: { ...sharedStyle, visibility: shouldShowCanvas ? undefined : 'hidden' },
     } as { videoStyle: CSSProperties, canvasStyle: CSSProperties };
   }, [loading, debouncedState.playing, rotate]);
 

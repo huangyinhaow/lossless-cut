@@ -1,18 +1,23 @@
 import { join } from 'node:path';
 import readline from 'node:readline';
 import stringToStream from 'string-to-stream';
-import { BufferEncodingOption, execa, ExecaChildProcess, Options as ExecaOptions } from 'execa';
+import { execa, Options as ExecaOptions, ResultPromise } from 'execa';
 import assert from 'node:assert';
 import { Readable } from 'node:stream';
 // eslint-disable-next-line import/no-extraneous-dependencies
 import { app } from 'electron';
 
-import { platform, arch, isWindows, isMac, isLinux } from './util.js';
-import { CaptureFormat, Html5ifyMode, Waveform } from '../../types.js';
+import { platform, arch, isWindows, isLinux } from './util.js';
+import { CaptureFormat, Waveform } from '../../types.js';
 import isDev from './isDev.js';
+import logger from './logger.js';
+import { parseFfmpegProgressLine } from './progress.js';
 
-
-const runningFfmpegs = new Set<ExecaChildProcess<Buffer>>();
+// cannot use process.kill: https://github.com/sindresorhus/execa/issues/1177
+const runningFfmpegs = new Set<{
+  process: ResultPromise<Omit<ExecaOptions, 'encoding'> & { encoding: 'buffer' }>,
+  abortController: AbortController,
+}>();
 // setInterval(() => console.log(runningFfmpegs.size), 1000);
 
 let customFfPath: string | undefined;
@@ -22,8 +27,17 @@ export function setCustomFfPath(path: string | undefined) {
   customFfPath = path;
 }
 
+function escapeCliArg(arg: string) {
+  // todo change String(arg) => arg when ts no-implicit-any is turned on
+  if (isWindows) {
+    // https://github.com/mifi/lossless-cut/issues/2151
+    return /[\s"&<>^|]/.test(arg) ? `"${String(arg).replaceAll('"', '""')}"` : arg;
+  }
+  return /[^\w-]/.test(arg) ? `'${String(arg).replaceAll("'", '\'"\'"\'')}'` : arg;
+}
+
 export function getFfCommandLine(cmd: string, args: readonly string[]) {
-  return `${cmd} ${args.map((arg) => (/[^\w-]/.test(arg) ? `'${arg}'` : arg)).join(' ')}`;
+  return `${cmd} ${args.map((arg) => escapeCliArg(arg)).join(' ')}`;
 }
 
 function getFfPath(cmd: string) {
@@ -46,13 +60,18 @@ const getFfprobePath = () => getFfPath('ffprobe');
 export const getFfmpegPath = () => getFfPath('ffmpeg');
 
 export function abortFfmpegs() {
-  console.log('Aborting', runningFfmpegs.size, 'ffmpeg process(es)');
+  logger.info('Aborting', runningFfmpegs.size, 'ffmpeg process(es)');
   runningFfmpegs.forEach((process) => {
-    process.kill('SIGTERM', { forceKillAfterTimeout: 10000 });
+    process.abortController.abort();
   });
 }
 
-function handleProgress(process: { stderr: Readable | null }, durationIn: number | undefined, onProgress: (a: number) => void, customMatcher: (a: string) => void = () => undefined) {
+function handleProgress(
+  process: { stderr: Readable | null },
+  duration: number | undefined,
+  onProgress: (a: number) => void,
+  customMatcher?: (a: string) => void,
+) {
   if (!onProgress) return;
   if (process.stderr == null) return;
   onProgress(0);
@@ -62,70 +81,54 @@ function handleProgress(process: { stderr: Readable | null }, durationIn: number
     // console.log('progress', line);
 
     try {
-      // eslint-disable-next-line unicorn/better-regex
-      let match = line.match(/frame=\s*[^\s]+\s+fps=\s*[^\s]+\s+q=\s*[^\s]+\s+(?:size|Lsize)=\s*[^\s]+\s+time=\s*([^\s]+)\s+/);
-      // Audio only looks like this: "line size=  233422kB time=01:45:50.68 bitrate= 301.1kbits/s speed= 353x    "
-      // eslint-disable-next-line unicorn/better-regex
-      if (!match) match = line.match(/(?:size|Lsize)=\s*[^\s]+\s+time=\s*([^\s]+)\s+/);
-      if (!match) {
-        customMatcher(line);
-        return;
+      const progress = parseFfmpegProgressLine({ line, customMatcher, duration });
+      if (progress != null) {
+        onProgress(progress);
       }
-
-      const timeStr = match[1];
-      // console.log(timeStr);
-      const match2 = timeStr!.match(/^(\d+):(\d+):(\d+)\.(\d+)$/);
-      if (!match2) throw new Error(`Invalid time from ffmpeg progress ${timeStr}`);
-
-      const h = parseInt(match2[1]!, 10);
-      const m = parseInt(match2[2]!, 10);
-      const s = parseInt(match2[3]!, 10);
-      const cs = parseInt(match2[4]!, 10);
-      const time = (((h * 60) + m) * 60 + s) + cs / 100;
-      // console.log(time);
-
-      const progressTime = Math.max(0, time);
-      // console.log(progressTime);
-
-      if (durationIn == null) return;
-      const duration = Math.max(0, durationIn);
-      if (duration === 0) return;
-      const progress = duration ? Math.min(progressTime / duration, 1) : 0; // sometimes progressTime will be greater than cutDuration
-      onProgress(progress);
     } catch (err) {
-      // @ts-expect-error todo
-      console.log('Failed to parse ffmpeg progress line:', err.message);
+      logger.error('Failed to parse ffmpeg progress line:', err instanceof Error ? err.message : err);
     }
   });
 }
 
-function getExecaOptions({ env, ...customExecaOptions }: Omit<ExecaOptions<BufferEncodingOption>, 'buffer'> = {}) {
-  const execaOptions: Omit<ExecaOptions<BufferEncodingOption>, 'buffer'> = { ...customExecaOptions, encoding: 'buffer' };
-  // https://github.com/mifi/lossless-cut/issues/1143#issuecomment-1500883489
-  if (isLinux && !isDev && !customFfPath) {
-    return {
-      ...execaOptions,
-      env: { ...env, LD_LIBRARY_PATH: process.resourcesPath },
-    };
-  }
+function getExecaOptions({ env, cancelSignal, ...rest }: ExecaOptions = {}) {
+  // This is a ugly hack to please execa which expects cancelSignal to be a prototype of AbortSignal
+  // however this gets lost during @electron/remote passing
+  // https://github.com/sindresorhus/execa/blob/c8cff27a47b6e6f1cfbfec2bf7fa9dcd08cefed1/lib/terminate/cancel.js#L5
+  if (cancelSignal != null) Object.setPrototypeOf(cancelSignal, new AbortController().signal);
+
+  const execaOptions: Pick<ExecaOptions, 'env'> & { encoding: 'buffer' } = {
+    ...(cancelSignal != null && { cancelSignal }),
+    ...rest,
+    encoding: 'buffer' as const,
+    env: {
+      ...env,
+      // https://github.com/mifi/lossless-cut/issues/1143#issuecomment-1500883489
+      ...(isLinux && !isDev && !customFfPath && { LD_LIBRARY_PATH: process.resourcesPath }),
+    },
+  };
   return execaOptions;
 }
 
 // todo collect warnings from ffmpeg output and show them after export? example: https://github.com/mifi/lossless-cut/issues/1469
-function runFfmpegProcess(args: readonly string[], customExecaOptions?: Omit<ExecaOptions<BufferEncodingOption>, 'encoding'>, additionalOptions?: { logCli?: boolean }) {
+function runFfmpegProcess(args: readonly string[], customExecaOptions?: ExecaOptions, additionalOptions?: { logCli?: boolean }) {
   const ffmpegPath = getFfmpegPath();
-  if (additionalOptions?.logCli) console.log(getFfCommandLine('ffmpeg', args));
+  const { logCli = true } = additionalOptions ?? {};
+  if (logCli) logger.info(getFfCommandLine('ffmpeg', args));
 
-  const process = execa(ffmpegPath, args, getExecaOptions(customExecaOptions));
+  const abortController = new AbortController();
+  const process = execa(ffmpegPath, args, getExecaOptions({ ...customExecaOptions, cancelSignal: abortController.signal }));
+
+  const wrapped = { process, abortController };
 
   (async () => {
-    runningFfmpegs.add(process);
+    runningFfmpegs.add(wrapped);
     try {
       await process;
     } catch {
       // ignored here
     } finally {
-      runningFfmpegs.delete(process);
+      runningFfmpegs.delete(wrapped);
     }
   })();
   return process;
@@ -145,7 +148,9 @@ export async function runFfmpegConcat({ ffmpegArgs, concatTxt, totalDuration, on
 }
 
 export async function runFfmpegWithProgress({ ffmpegArgs, duration, onProgress }: {
-  ffmpegArgs: string[], duration: number | undefined, onProgress: (a: number) => void,
+  ffmpegArgs: string[],
+  duration?: number | undefined,
+  onProgress: (a: number) => void,
 }) {
   const process = runFfmpegProcess(ffmpegArgs);
   assert(process.stderr != null);
@@ -153,12 +158,12 @@ export async function runFfmpegWithProgress({ ffmpegArgs, duration, onProgress }
   return process;
 }
 
-export async function runFfprobe(args: readonly string[], { timeout = isDev ? 10000 : 30000 } = {}) {
+export async function runFfprobe(args: readonly string[], { timeout = isDev ? 10000 : 30000, logCli = true } = {}) {
   const ffprobePath = getFfprobePath();
-  console.log(getFfCommandLine('ffprobe', args));
+  if (logCli) logger.info(getFfCommandLine('ffprobe', args));
   const ps = execa(ffprobePath, args, getExecaOptions());
   const timer = setTimeout(() => {
-    console.warn('killing timed out ffprobe');
+    logger.warn('killing timed out ffprobe');
     ps.kill();
   }, timeout);
   try {
@@ -193,11 +198,10 @@ export async function renderWaveformPng({ filePath, start, duration, color, stre
     '-',
   ];
 
-  console.log(getFfCommandLine('ffmpeg1', args1));
-  console.log('|', getFfCommandLine('ffmpeg2', args2));
+  logger.info(`${getFfCommandLine('ffmpeg1', args1)} | \n${getFfCommandLine('ffmpeg2', args2)}`);
 
-  let ps1: ExecaChildProcess<Buffer> | undefined;
-  let ps2: ExecaChildProcess<Buffer> | undefined;
+  let ps1: ResultPromise<{ encoding: 'buffer' }> | undefined;
+  let ps2: ResultPromise<{ encoding: 'buffer' }> | undefined;
   try {
     ps1 = runFfmpegProcess(args1, { buffer: false }, { logCli: false });
     ps2 = runFfmpegProcess(args2, undefined, { logCli: false });
@@ -208,7 +212,7 @@ export async function renderWaveformPng({ filePath, start, duration, color, stre
     const timer = setTimeout(() => {
       ps1?.kill();
       ps2?.kill();
-      console.warn('ffmpeg timed out');
+      logger.warn('ffmpeg timed out');
     }, 10000);
 
     let stdout;
@@ -219,7 +223,7 @@ export async function renderWaveformPng({ filePath, start, duration, color, stre
     }
 
     return {
-      buffer: stdout,
+      buffer: Buffer.from(stdout),
     };
   } catch (err) {
     if (ps1) ps1.kill();
@@ -234,12 +238,18 @@ const getInputSeekArgs = ({ filePath, from, to }: { filePath: string, from?: num
   ...(from != null && to != null ? ['-t', (to - from).toFixed(5)] : []),
 ];
 
-export function mapTimesToSegments(times: number[]) {
+export function mapTimesToSegments(times: number[], includeLast: boolean) {
   const segments: { start: number, end: number | undefined }[] = [];
   for (let i = 0; i < times.length; i += 1) {
     const start = times[i];
     const end = times[i + 1];
-    if (start != null) segments.push({ start, end }); // end undefined is allowed (means until end of video)
+    if (start != null) {
+      if (end != null) {
+        segments.push({ start, end });
+      } else if (includeLast) {
+        segments.push({ start, end }); // end undefined is allowed (means until end of video)
+      }
+    }
   }
   return segments;
 }
@@ -280,13 +290,13 @@ export async function detectSceneChanges({ filePath, minChange, onProgress, from
 
   await process;
 
-  const segments = mapTimesToSegments(times);
+  const segments = mapTimesToSegments(times, false);
 
-  return adjustSegmentsWithOffset({ segments, from });
+  return { detectedSegments: adjustSegmentsWithOffset({ segments, from }), ffmpegArgs: args };
 }
 
-async function detectIntervals({ filePath, customArgs, onProgress, from, to, matchLineTokens }: {
-  filePath: string, customArgs: string[], onProgress: (p: number) => void, from: number, to: number, matchLineTokens: (line: string) => { start?: string | number | undefined, end?: string | number | undefined },
+async function detectIntervals({ filePath, customArgs, onProgress, from, to, matchLineTokens, boundingMode }: {
+  filePath: string, customArgs: string[], onProgress: (p: number) => void, from: number, to: number, matchLineTokens: (line: string) => { start: number, end: number } | undefined, boundingMode: boolean
 }) {
   const args = [
     '-hide_banner',
@@ -296,93 +306,100 @@ async function detectIntervals({ filePath, customArgs, onProgress, from, to, mat
   ];
   const process = runFfmpegProcess(args, { buffer: false });
 
-  const segments: { start: number, end: number }[] = [];
+  let segments: { start: number, end: number }[] = [];
+  const midpoints: number[] = [];
 
   function customMatcher(line: string) {
-    const { start: startRaw, end: endRaw } = matchLineTokens(line);
-    if (typeof startRaw === 'number' && typeof endRaw === 'number') {
-      if (startRaw == null || endRaw == null) return;
-      if (Number.isNaN(startRaw) || Number.isNaN(endRaw)) return;
-      segments.push({ start: startRaw, end: endRaw });
-    } else if (typeof startRaw === 'string' && typeof endRaw === 'string') {
-      if (startRaw == null || endRaw == null) return;
-      const start = parseFloat(startRaw);
-      const end = parseFloat(endRaw);
-      if (Number.isNaN(start) || Number.isNaN(end)) return;
+    const match = matchLineTokens(line);
+    if (match == null) return;
+    const { start, end } = match;
+
+    if (boundingMode) {
       segments.push({ start, end });
     } else {
-      throw new TypeError('Invalid line match');
+      midpoints.push(start + ((end - start) / 2));
     }
   }
   handleProgress(process, to - from, onProgress, customMatcher);
 
   await process;
-  return adjustSegmentsWithOffset({ segments, from });
+
+  if (!boundingMode) {
+    segments = midpoints.flatMap((time, i) => [
+      {
+        start: midpoints[i - 1] ?? 0,
+        end: time,
+      },
+    ]);
+
+    const lastMidpoint = midpoints.at(-1);
+    if (lastMidpoint != null) {
+      segments.push({
+        start: lastMidpoint,
+        end: to - from,
+      });
+    }
+  }
+
+  return { detectedSegments: adjustSegmentsWithOffset({ segments, from }), ffmpegArgs: args };
 }
 
 const mapFilterOptions = (options: Record<string, string>) => Object.entries(options).map(([key, value]) => `${key}=${value}`).join(':');
 
-export async function blackDetect({ filePath, filterOptions, onProgress, from, to }: { filePath: string, filterOptions: Record<string, string>, onProgress: (p: number) => void, from: number, to: number }) {
-  const customArgs = ['-vf', `blackdetect=${mapFilterOptions(filterOptions)}`, '-an'];
-  return detectIntervals({
-    filePath,
-    onProgress,
-    from,
-    to,
-    matchLineTokens: (line) => {
-      // eslint-disable-next-line unicorn/better-regex
-      const match = line.match(/^[blackdetect\s*@\s*0x[0-9a-f]+] black_start:([\d\\.]+) black_end:([\d\\.]+) black_duration:[\d\\.]+/);
-      if (!match) {
-        return {
-          start: undefined,
-          end: undefined,
-        };
-      }
-      return {
-        start: match[1],
-        end: match[2],
-      };
-    },
-    customArgs,
-  });
-}
-
-export async function silenceDetect({ filePath, filterOptions, onProgress, from, to }: {
-  filePath: string, filterOptions: Record<string, string>, onProgress: (p: number) => void, from: number, to: number,
+export async function blackDetect({ filePath, filterOptions, boundingMode, onProgress, from, to }: {
+  filePath: string, filterOptions: Record<string, string>, boundingMode: boolean, onProgress: (p: number) => void, from: number, to: number,
 }) {
   return detectIntervals({
     filePath,
     onProgress,
     from,
     to,
+    boundingMode,
+    matchLineTokens: (line) => {
+      // eslint-disable-next-line unicorn/better-regex
+      const match = line.match(/^[blackdetect\s*@\s*0x[0-9a-f]+] black_start:([\d\\.]+) black_end:([\d\\.]+) black_duration:[\d\\.]+/);
+      if (!match) {
+        return undefined;
+      }
+      const start = parseFloat(match[1]!);
+      const end = parseFloat(match[2]!);
+      if (Number.isNaN(start) || Number.isNaN(end)) {
+        return undefined;
+      }
+      if (start < 0 || end <= 0 || start >= end) {
+        return undefined;
+      }
+      return { start, end };
+    },
+    customArgs: ['-vf', `blackdetect=${mapFilterOptions(filterOptions)}`, '-an'],
+  });
+}
+
+export async function silenceDetect({ filePath, filterOptions, boundingMode, onProgress, from, to }: {
+  filePath: string, filterOptions: Record<string, string>, boundingMode: boolean, onProgress: (p: number) => void, from: number, to: number,
+}) {
+  return detectIntervals({
+    filePath,
+    onProgress,
+    from,
+    to,
+    boundingMode,
     matchLineTokens: (line) => {
       // eslint-disable-next-line unicorn/better-regex
       const match = line.match(/^[silencedetect\s*@\s*0x[0-9a-f]+] silence_end: ([\d\\.]+)[|\s]+silence_duration: ([\d\\.]+)/);
       if (!match) {
-        return {
-          start: undefined,
-          end: undefined,
-        };
+        return undefined;
       }
       const end = parseFloat(match[1]!);
       const silenceDuration = parseFloat(match[2]!);
       if (Number.isNaN(end) || Number.isNaN(silenceDuration)) {
-        return {
-          start: undefined,
-          end: undefined,
-        };
+        return undefined;
       }
       const start = end - silenceDuration;
       if (start < 0 || end <= 0 || start >= end) {
-        return {
-          start: undefined,
-          end: undefined,
-        };
+        return undefined;
       }
-      return {
-        start,
-        end,
-      };
+      return { start, end };
     },
     customArgs: ['-af', `silencedetect=${mapFilterOptions(filterOptions)}`, '-vn'],
   });
@@ -407,7 +424,15 @@ function getCodecOpts(captureFormat: CaptureFormat) {
 }
 
 export async function captureFrames({ from, to, videoPath, outPathTemplate, quality, filter, framePts, onProgress, captureFormat }: {
-  from: number, to: number, videoPath: string, outPathTemplate: string, quality: number, filter?: string | undefined, framePts?: boolean | undefined, onProgress: (p: number) => void, captureFormat: CaptureFormat,
+  from: number,
+  to: number,
+  videoPath: string,
+  outPathTemplate: string,
+  quality: number,
+  filter?: string | undefined,
+  framePts?: boolean | undefined,
+  onProgress: (p: number) => void,
+  captureFormat: CaptureFormat,
 }) {
   const args = [
     '-ss', String(from),
@@ -428,142 +453,36 @@ export async function captureFrames({ from, to, videoPath, outPathTemplate, qual
   handleProgress(process, to - from, onProgress);
 
   await process;
+  return args;
 }
 
 export async function captureFrame({ timestamp, videoPath, outPath, quality }: {
   timestamp: number, videoPath: string, outPath: string, quality: number,
 }) {
   const ffmpegQuality = getFffmpegJpegQuality(quality);
-  await runFfmpegProcess([
+  const args = [
     '-ss', String(timestamp),
     '-i', videoPath,
     '-vframes', '1',
     '-q:v', String(ffmpegQuality),
     '-y', outPath,
-  ]);
+  ];
+  await runFfmpegProcess(args);
+  return args;
 }
 
 
 async function readFormatData(filePath: string) {
-  console.log('readFormatData', filePath);
+  logger.info('readFormatData', filePath);
 
   const { stdout } = await runFfprobe([
     '-of', 'json', '-show_format', '-i', filePath, '-hide_banner',
   ]);
-  return JSON.parse(stdout as unknown as string).format;
+  return JSON.parse(new TextDecoder().decode(stdout)).format;
 }
 
 export async function getDuration(filePath: string) {
   return parseFloat((await readFormatData(filePath)).duration);
-}
-
-export async function html5ify({ outPath, filePath: filePathArg, speed, hasAudio, hasVideo, onProgress }: {
-  outPath: string, filePath: string, speed: Html5ifyMode, hasAudio: boolean, hasVideo: boolean, onProgress: (p: number) => void,
-}) {
-  let audio;
-  if (hasAudio) {
-    if (speed === 'slowest') audio = 'hq';
-    else if (['slow-audio', 'fast-audio'].includes(speed)) audio = 'lq';
-    else if (['fast-audio-remux'].includes(speed)) audio = 'copy';
-  }
-
-  let video;
-  if (hasVideo) {
-    if (speed === 'slowest') video = 'hq';
-    else if (['slow-audio', 'slow'].includes(speed)) video = 'lq';
-    else video = 'copy';
-  }
-
-  console.log('Making HTML5 friendly version', { filePathArg, outPath, speed, video, audio });
-
-  let videoArgs;
-  let audioArgs;
-
-  // h264/aac_at: No licensing when using HW encoder (Video/Audio Toolbox on Mac)
-  // https://github.com/mifi/lossless-cut/issues/372#issuecomment-810766512
-
-  const targetHeight = 400;
-
-  switch (video) {
-    case 'hq': {
-      // eslint-disable-next-line unicorn/prefer-ternary
-      if (isMac) {
-        videoArgs = ['-vf', 'format=yuv420p', '-allow_sw', '1', '-vcodec', 'h264', '-b:v', '15M'];
-      } else {
-        // AV1 is very slow
-        // videoArgs = ['-vf', 'format=yuv420p', '-sws_flags', 'neighbor', '-vcodec', 'libaom-av1', '-crf', '30', '-cpu-used', '8'];
-        // Theora is a bit faster but not that much
-        // videoArgs = ['-vf', '-c:v', 'libtheora', '-qscale:v', '1'];
-        // videoArgs = ['-vf', 'format=yuv420p', '-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0', '-row-mt', '1'];
-        // x264 can only be used in GPL projects
-        videoArgs = ['-vf', 'format=yuv420p', '-c:v', 'libx264', '-profile:v', 'high', '-preset:v', 'slow', '-crf', '17'];
-      }
-      break;
-    }
-    case 'lq': {
-      // eslint-disable-next-line unicorn/prefer-ternary
-      if (isMac) {
-        videoArgs = ['-vf', `scale=-2:${targetHeight},format=yuv420p`, '-allow_sw', '1', '-sws_flags', 'lanczos', '-vcodec', 'h264', '-b:v', '1500k'];
-      } else {
-        // videoArgs = ['-vf', `scale=-2:${targetHeight},format=yuv420p`, '-sws_flags', 'neighbor', '-c:v', 'libtheora', '-qscale:v', '1'];
-        // x264 can only be used in GPL projects
-        videoArgs = ['-vf', `scale=-2:${targetHeight},format=yuv420p`, '-sws_flags', 'neighbor', '-c:v', 'libx264', '-profile:v', 'baseline', '-x264opts', 'level=3.0', '-preset:v', 'ultrafast', '-crf', '28'];
-      }
-      break;
-    }
-    case 'copy': {
-      videoArgs = ['-vcodec', 'copy'];
-      break;
-    }
-    default: {
-      videoArgs = ['-vn'];
-    }
-  }
-
-  switch (audio) {
-    case 'hq': {
-      // eslint-disable-next-line unicorn/prefer-ternary
-      if (isMac) {
-        audioArgs = ['-acodec', 'aac_at', '-b:a', '192k'];
-      } else {
-        audioArgs = ['-acodec', 'flac'];
-      }
-      break;
-    }
-    case 'lq': {
-      // eslint-disable-next-line unicorn/prefer-ternary
-      if (isMac) {
-        audioArgs = ['-acodec', 'aac_at', '-ar', '44100', '-ac', '2', '-b:a', '96k'];
-      } else {
-        audioArgs = ['-acodec', 'flac', '-ar', '11025', '-ac', '2'];
-      }
-      break;
-    }
-    case 'copy': {
-      audioArgs = ['-acodec', 'copy'];
-      break;
-    }
-    default: {
-      audioArgs = ['-an'];
-    }
-  }
-
-  const ffmpegArgs = [
-    '-hide_banner',
-
-    '-i', filePathArg,
-    ...videoArgs,
-    ...audioArgs,
-    '-sn',
-    '-y', outPath,
-  ];
-
-  const duration = await getDuration(filePathArg);
-  const process = runFfmpegProcess(ffmpegArgs);
-  if (duration) handleProgress(process, duration, onProgress);
-
-  const { stdout } = await process;
-  console.log(stdout.toString('utf8'));
 }
 
 export function readOneJpegFrame({ path, seekTo, videoStreamIndex }: { path: string, seekTo: number, videoStreamIndex: number }) {
@@ -585,9 +504,8 @@ export function readOneJpegFrame({ path, seekTo, videoStreamIndex }: { path: str
     '-',
   ];
 
-  // console.log(args);
-
-  return runFfmpegProcess(args, undefined, { logCli: true });
+  // logger.info(getFfCommandLine('ffmpeg', args));
+  return runFfmpegProcess(args, undefined, { logCli: false });
 }
 
 const enableLog = false;
@@ -650,9 +568,23 @@ export function createMediaSourceProcess({ path, videoStreamIndex, audioStreamIn
     '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-',
   ];
 
-  if (enableLog) console.log(getFfCommandLine('ffmpeg', args));
+  if (enableLog) logger.info(getFfCommandLine('ffmpeg', args));
 
-  return execa(getFfmpegPath(), args, { encoding: null, buffer: false, stderr: enableLog ? 'inherit' : 'pipe' });
+  return execa(getFfmpegPath(), args, { encoding: 'buffer', buffer: false, stderr: enableLog ? 'inherit' : 'pipe' });
+}
+
+export async function downloadMediaUrl(url: string, outPath: string) {
+  // User agent taken from https://techblog.willshouse.com/2012/01/03/most-common-user-agents/
+  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  const args = [
+    '-hide_banner', '-loglevel', 'error',
+    '-user_agent', userAgent,
+    '-i', url,
+    '-c', 'copy',
+    outPath,
+  ];
+
+  await runFfmpegProcess(args);
 }
 
 // Don't pass complex objects over the bridge (process)

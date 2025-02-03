@@ -58,6 +58,8 @@ The main feature is lossless trimming and cutting of video and audio files, whic
 - Divide timeline into segments with length L or into N segments or even randomized segments!
 - Speed up / slow down video or audio file ([changing FPS](https://github.com/mifi/lossless-cut/issues/1712))
 - Basic [CLI](cli.md) and [HTTP API](api.md)
+- Show (DJI) embedded GPS track on a map
+- Losslessly Download videos over HTTP (e.g. HLS `.m3u8`)
 
 ## Example lossless use cases
 
@@ -109,22 +111,19 @@ If you want to support my continued work on LosslessCut, and you want the advant
 
 For Linux these are some alternatives:
 
-<a href="https://snapcraft.io/losslesscut"><img src="https://snapcraft.io/static/images/badges/en/snap-store-black.svg" alt="Snapcraft" height="50"/></a> <a href="https://flathub.org/apps/details/no.mifi.losslesscut"><img src="https://flathub.org/assets/badges/flathub-badge-en.png" alt="Flathub" height="50"/></a>
+<a href="https://snapcraft.io/losslesscut"><img src="https://github.com/mifi/lossless-cut/raw/master/snap-store-black.svg?sanitize=true" alt="Snapcraft" height="50"/></a> <a href="https://flathub.org/apps/details/no.mifi.losslesscut"><img src="https://github.com/mifi/lossless-cut/raw/master/flathub-badge.svg?sanitize=true" alt="Flathub" height="50"/></a>
 
 If you prefer to download the executables manually, this will of course always be free:
 
 - Mac OS X: [Intel DMG](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-mac-x64.dmg) / [Apple Silicon DMG](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-mac-arm64.dmg) (note that universal.pkg **does not work**)
-- Windows: [7zip](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-win-x64.7z) (Windows 7, 8 and 8.1 is **no longer supported** after [v3.50.0](https://github.com/mifi/lossless-cut/releases/tag/v3.50.0))
+- Windows: [7zip](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-win-x64.7z) (Windows 7, 8 and 8.1 is [no longer supported](https://github.com/mifi/lossless-cut/discussions/1476) after [v3.50.0](https://github.com/mifi/lossless-cut/releases/tag/v3.50.0))
 - Linux: [x64 tar.bz2](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-linux-x64.tar.bz2) / [x64 AppImage](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-linux-x86_64.AppImage) / [arm64 tar.bz2](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-linux-arm64.tar.bz2) / [Raspberry Pi armv7l](https://github.com/mifi/lossless-cut/releases/latest/download/LosslessCut-linux-armv7l.tar.bz2)
 - [More releases](https://github.com/mifi/lossless-cut/releases) (note that APPX for Windows and PKG for MacOS **do not work**)
+- [Download latest nightly builds 🧪](https://mifi.no/llc/nightly/).
 
 If you find LosslessCut useful, I'm very thankful for [your support](https://github.com/mifi/lossless-cut#donate-).
 
-**What's the difference between App Stores and GitHub download?** [Please see FAQ](issues.md#app-stores-and-github-difference)
-
-### Nightly builds 🧪
-
-If you want to test the very latest and greatest bleeding-edge version. 1. Go to [Actions](https://github.com/mifi/lossless-cut/actions/workflows/build.yml), 2. click on the latest *Build/release*, 3. scroll all the way down to *Artifacts*. **Note:** these builds may be totally broken!
+What's the **difference between App Stores and GitHub download?** [Please see FAQ](issues.md#app-stores-and-github-difference)
 
 ## [Supported operating systems](./requirements.md)
 
@@ -164,13 +163,15 @@ Codecs and formats not listed above can still be converted to a supported format
 - Press <kbd>SHIFT</kbd> + <kbd>/</kbd> to view all keyboard & mouse shortcuts.
 - **Note:** The original video file will not be modified. Instead, a file is created file in the same directory as the original file with from/to timestamps in the file name.
 
+## [Installation](./installation.md)
+
 ## [Import / export](import-export.md)
 
 ## [Command line interface (CLI)](cli.md) & [HTTP API](api.md)
 
 ## [Known issues, limitations, troubleshooting, FAQ](issues.md)
 
-## [Contributing](developer-notes.md)
+## [Contributing](CONTRIBUTING.md)
 
 ## [Translation](translation.md)
 
@@ -186,7 +187,8 @@ This project is maintained by me alone. The project will always remain free and 
 
 - [Featured in the Console newsletter](https://console.substack.com/p/console-93)
 - Hacker News [2024](https://news.ycombinator.com/item?id=40829494) [2022](https://news.ycombinator.com/item?id=33969490) [2020-10](https://news.ycombinator.com/item?id=24883030) [2020-01](https://news.ycombinator.com/item?id=22026412) [2016](https://news.ycombinator.com/item?id=12885585)
-- Are you using LosslessCut for some interesting project and want your link here? Reach out!
+- [LosslessCut on Wikipedia](https://en.m.wikipedia.org/wiki/LosslessCut)
+- Your link here?
 
 <img src="https://api.star-history.com/svg?repos=mifi/lossless-cut&type=Date" alt="Star History Chart" width="400px" />
 
